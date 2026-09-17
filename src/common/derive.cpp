@@ -14,13 +14,35 @@ namespace zp {
 // 0x55-bytes toevallig naar uitvoerbaar geheugen wees.
 static bool looksLikeVtable(const Target& t, uint64_t vt) {
     if (!vt || !t.inImage(vt)) return false;
+
+    // Uitlijning is de scherpste en goedkoopste zeef. De valse positief die
+    // in een echte meting opdook, 0x00555555 uit een blok opvulbytes, is niet
+    // deelbaar door vier en sneuvelt hier al.
     if (vt & (t.ptrSize() - 1)) return false;
-    for (int i = 0; i < 4; ++i) {
-        uint64_t fn = 0;
-        if (!t.rptr(vt + (uint64_t)i * t.ptrSize(), fn)) return false;
-        if (!fn || !t.isExecutable(fn)) return false;
-    }
-    return true;
+
+    const Region* r = t.findRegion(vt);
+    if (!r) return false;
+
+    // Slot 0 moet naar code wijzen.
+    uint64_t fn0 = 0;
+    if (!t.rptr(vt, fn0)) return false;
+    if (!fn0 || !t.isExecutable(fn0)) return false;
+
+    // Daarna een van twee bevestigingen, niet allebei verplicht:
+    //
+    //  - de vtable staat in alleen-lezen geheugen, waar vtables horen; of
+    //  - er is een tweede slot dat ook naar code wijst.
+    //
+    // Allebei eisen is te streng. Een harde alleen-lezen-eis gaat kapot op
+    // een binary die .rdata in een schrijfbare sectie heeft samengevoegd, en
+    // vier slots eisen kostte ons in v2 de Object-vtable. Een van beide is
+    // genoeg om opvulling af te vangen: die heeft zelden twee code-pointers
+    // op rij, en ligt zelden in alleen-lezen geheugen.
+    if (!r->writable()) return true;
+
+    uint64_t fn1 = 0;
+    if (!t.rptr(vt + t.ptrSize(), fn1)) return false;
+    return fn1 && t.isExecutable(fn1);
 }
 
 // Wijst dit woord naar een object met een geloofwaardige vtable?
@@ -161,7 +183,6 @@ std::vector<LinkPair> findDoubleLinks(const Target& t,
                                       int32_t reachA,
                                       int32_t reachB,
                                       bool requireDistinct) {
-    std::unordered_set<uint64_t> vtSet(vtables.begin(), vtables.end());
     std::map<std::tuple<uint64_t, int32_t, uint64_t, int32_t>, uint32_t> tally;
     const int32_t ps = (int32_t)t.ptrSize();
 
@@ -174,10 +195,11 @@ std::vector<LinkPair> findDoubleLinks(const Target& t,
                 if (B == A) continue;
                 uint64_t vtB = 0;
                 if (!t.rptr(B, vtB)) continue;
-                if (!vtSet.count(vtB)) continue;
-                // Object heeft m_next en m_prev. Zo'n dubbelgelinkte lijst
-                // geeft perfecte wederzijdse verwijzingen en verdringt de
-                // echte Object <-> BodyModule-relatie volledig.
+                // De B-kant mag elke geloofwaardige klasse zijn, niet alleen
+                // een uit de kandidatenlijst. In v2 leverde die beperking nul
+                // resultaten op, simpelweg omdat de tegenpartij net buiten de
+                // top van het histogram viel.
+                if (!looksLikeVtable(t, vtB)) continue;
                 if (requireDistinct && vtB == vtA) continue;
                 for (int32_t ob = -reachB; ob <= reachB; ob += ps) {
                     uint64_t back = 0;
@@ -260,7 +282,14 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
                                           const std::vector<uint64_t>& bodyObjects,
                                           int32_t fromOffset,
                                           int32_t toOffset) {
-    std::map<int32_t, HealthBlock> tally;
+    struct Acc {
+        uint32_t hits = 0;
+        uint32_t damaged = 0;
+        std::vector<float> maxima;
+        float lastCurrent = 0;
+        float lastMax = 0;
+    };
+    std::map<int32_t, Acc> tally;
 
     for (uint64_t body : bodyObjects) {
         for (int32_t off = fromOffset; off + 16 <= toOffset; off += 4) {
@@ -277,16 +306,35 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
             if (cur > mx * 1.001f) continue;            // current mag max niet overstijgen
             if (std::fabs(mx - init) > 0.01f) continue; // max == initial in de regel
 
-            HealthBlock& b = tally[off];
-            b.offset = off;
-            b.confirmations++;
-            b.sampleCurrent = cur;
-            b.sampleMax = mx;
+            Acc& acc = tally[off];
+            acc.hits++;
+            if (cur < mx * 0.999f) acc.damaged++;
+            acc.maxima.push_back(mx);
+            acc.lastCurrent = cur;
+            acc.lastMax = mx;
         }
     }
 
     std::vector<HealthBlock> out;
-    for (auto& kv : tally) out.push_back(kv.second);
+    for (auto& kv : tally) {
+        HealthBlock b;
+        b.offset = kv.first;
+        b.confirmations = kv.second.hits;
+        b.damaged = kv.second.damaged;
+        b.sampleCurrent = kv.second.lastCurrent;
+        b.sampleMax = kv.second.lastMax;
+
+        std::vector<float>& m = kv.second.maxima;
+        std::sort(m.begin(), m.end());
+        b.medianMax = m.empty() ? 0.0f : m[m.size() / 2];
+        // Waarden die binnen een promille liggen tellen als dezelfde.
+        uint32_t distinct = 0;
+        for (size_t i = 0; i < m.size(); ++i)
+            if (i == 0 || m[i] > m[i - 1] * 1.001f) distinct++;
+        b.distinctMax = distinct;
+
+        out.push_back(b);
+    }
     std::sort(out.begin(), out.end(), [](const HealthBlock& a, const HealthBlock& b) {
         return a.confirmations > b.confirmations;
     });
@@ -306,22 +354,37 @@ std::vector<HealthVtable> findHealthVtables(const Target& t,
         if (insts.size() < 8) continue;   // te weinig om iets over te zeggen
 
         std::vector<HealthBlock> hb = findHealthBlocks(t, insts, fromOffset, toOffset);
-        if (hb.empty()) continue;
+
+        // Kies niet het blok met de meeste treffers, maar het blok dat zich
+        // het meest als hitpoints gedraagt. Een veld dat overal dezelfde
+        // waarde heeft is geen health, hoe vaak het ook matcht.
+        const HealthBlock* best = nullptr;
+        double bestScore = 0.0;
+        for (const HealthBlock& b : hb) {
+            if (b.medianMax < 10.0f) continue;      // te klein voor hitpoints
+            if (b.distinctMax < 4) continue;        // geen variatie tussen objecttypes
+            double ratio = (double)b.confirmations / (double)insts.size();
+            double variety = (double)b.distinctMax / (double)b.confirmations;
+            double sc = ratio * (0.25 + 0.75 * variety);
+            if (sc > bestScore) { bestScore = sc; best = &b; }
+        }
+        if (!best) continue;
 
         HealthVtable h;
         h.vtable = vt;
-        h.offset = hb[0].offset;
-        h.confirmations = hb[0].confirmations;
+        h.offset = best->offset;
+        h.confirmations = best->confirmations;
         h.sampled = (uint32_t)insts.size();
+        h.distinctMax = best->distinctMax;
+        h.damaged = best->damaged;
+        h.medianMax = best->medianMax;
         h.ratio = (double)h.confirmations / (double)h.sampled;
+        h.score = bestScore;
         out.push_back(h);
     }
 
-    // De body-module valt op doordat vrijwel elke instantie hitpoints heeft
-    // op dezelfde offset. Een toevallige treffer haalt die consistentie niet.
     std::sort(out.begin(), out.end(), [](const HealthVtable& a, const HealthVtable& b) {
-        if (a.ratio != b.ratio) return a.ratio > b.ratio;
-        return a.confirmations > b.confirmations;
+        return a.score > b.score;
     });
     return out;
 }

@@ -240,3 +240,59 @@ structurele link naar `Object` gelegd, geankerd op iets dat al vaststaat.
 - **Dit is het basisspel.** Het pad was `Command and Conquer Generals`, dus de
   `Generals/`-tree van de broncode, niet `GeneralsMD/`. Zero Hour is een
   aparte binary met eigen offsets en heeft zijn eigen meting nodig.
+
+---
+
+# Wat de tweede meting leerde
+
+De v2-probe vond ThePlayerList wel, maar strandde daarna: *"Geen wederzijdse
+verwijzingen tussen verschillende klassen gevonden."* Twee oorzaken, en de
+eerste had ik zelf veroorzaakt.
+
+## 4. Te streng is net zo fout als te los
+
+Om de opvulling uit fout 3 af te vangen, eiste v2 dat vier opeenvolgende
+vtable-slots naar code wezen. Dat was overbodig en schadelijk. De echte
+valse positief, `0x00555555`, is niet deelbaar door vier; de
+uitlijningscontrole alleen had hem al afgevangen.
+
+Wat de vier-slot-eis wél deed, was echte vtables wegsnijden. In de v1-meting
+stond `0x9a726c` met 2000 instanties in het histogram, precies de vtable met
+de `m_next`/`m_prev`-lijst. In v2 was hij volledig verdwenen.
+
+De controle is nu: uitgelijnd, slot 0 wijst naar code, en dan één van twee
+bevestigingen: het adres ligt in alleen-lezen geheugen, óf er is een tweede
+slot dat ook naar code wijst. Allebei eisen breekt op binaries die `.rdata`
+in een schrijfbare sectie samenvoegen.
+
+## 5. De tegenpartij hoeft niet in de top van het histogram te staan
+
+De zoektocht naar wederzijdse verwijzingen eiste dat *beide* kanten in de
+kandidatenlijst stonden, de veertig meest voorkomende vtables. Dat is een
+willekeurige grens: valt de tegenpartij er net buiten, dan is het resultaat
+nul, ook al bestaat de relatie gewoon. De B-kant hoeft nu alleen een
+geloofwaardige vtable te zijn.
+
+## 6. De dubbelgelinkte lijst is een aanwijzing, geen ruis
+
+Fout 2 loste v2 op door zelf-verwijzende links weg te gooien. Dat is het kind
+met het badwater. `Object` is juist de klasse *met* een dubbelgelinkte lijst,
+dus een vtable die op twee verschillende offsets naar zichzelf wijst is een
+positieve vingerafdruk van `Object`.
+
+De probe rapporteert die lijst nu apart en gebruikt hem als bevestiging: een
+resolutie waarbij de hitpoint-kandidaat een link heeft naar precies de klasse
+die de objectlijst draagt, steunt op twee onafhankelijke aanwijzingen.
+
+## 7. Een hoog aandeel is geen bewijs
+
+In de v2-meting scoorden zestien vtables tegelijk 100% op het
+hitpoint-patroon. Dat patroon, vier floats met `current <= max` en
+`max == initial`, wordt ook gehaald door elk veld dat overal `1.0 1.0 1.0
+1.0` bevat.
+
+Wat hitpoints onderscheidt is variatie: verschillende objecttypes hebben
+verschillende max-health. De score weegt nu mee hoeveel verschillende
+max-waarden er voorkomen, eist er minstens vier, en eist dat de mediaan
+minstens 10 is. Het aantal beschadigde instanties (`current < max`) staat er
+als extra aanwijzing bij.

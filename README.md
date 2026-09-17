@@ -17,7 +17,8 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 |---|---|---|
 | 1 | Onderzoek naar het schadepad in de EA-broncode | **klaar** |
 | 1 | `zp-probe`: leest het draaiende spel uit en meet de offsets | **klaar, getest** |
-| 1 | Eerste meting op Generals, drie heuristiekfouten gevonden en hersteld | **klaar** |
+| 1 | Eerste meting op Generals, drie heuristiekfouten hersteld | **klaar** |
+| 1 | Tweede meting, vier vervolgfouten hersteld | **klaar** |
 | 2 | `zp-freeze.dll`: de damage-hook | wacht op een proberapport |
 | 2 | `zp-inject.exe` + F10-toggle | wacht op fase 2 |
 

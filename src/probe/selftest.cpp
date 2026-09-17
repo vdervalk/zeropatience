@@ -23,8 +23,15 @@ namespace {
 
 // --- de layout die we nabouwen, en meteen het verwachte antwoord -----------
 enum : uint32_t {
+    // Het image bestaat uit twee regio's, net als een echte PE: alleen-lezen
+    // data waar de vtables staan, en schrijfbare data waar dat niet zo is.
     IMAGE_BASE   = 0x00400000,
-    IMAGE_SIZE   = 0x00010000,
+    IMAGE_SIZE   = 0x00018000,
+    RODATA_BASE  = 0x00400000,
+    RODATA_SIZE  = 0x00010000,
+    DATA_BASE    = 0x00410000,
+    DATA_SIZE    = 0x00008000,
+
     CODE_ADDR    = 0x00401000,   // "uitvoerbaar", doel van elk vtable-slot
     VT_AREA      = 0x00408000,   // hier leggen we de vtables neer
 
@@ -56,21 +63,31 @@ enum : uint32_t {
     LOCAL_PLAYER    = 2,
     NUM_OBJECTS     = 32,
 
-    // Valkuil: een adres in het image met precies een uitvoerbaar slot,
-    // gevolgd door nullen. Een controle op alleen slot 0 accepteert dit als
-    // vtable; in een echte meting haalde 0x00555555 zo het histogram.
-    FAKE_VT_ADDR    = 0x00409000,
-    FAKE_VT_REFS    = 400,
+    // Twee valkuilen, allebei naar een echte meting gemodelleerd.
+    //
+    // De eerste is precies wat er gebeurde: 0x00555555 uit een blok
+    // opvulbytes haalde het histogram met 2244 "instanties". Dat adres is
+    // niet deelbaar door vier, dus uitlijning is de zeef die het afvangt.
+    FAKE_VT_UNALIGNED = 0x00405555,
+
+    // De tweede is een net adres in SCHRIJFBARE data waarvan het eerste woord
+    // toevallig naar code wijst. Uitlijning helpt hier niet; wat het afvangt
+    // is dat echte vtables in alleen-lezen data staan.
+    FAKE_VT_WRITABLE  = 0x00411000,
+
+    FAKE_VT_REFS      = 400,
 };
 
 struct Space {
-    std::vector<uint8_t> image;
+    std::vector<uint8_t> image;   // alleen-lezen deel
+    std::vector<uint8_t> data;    // schrijfbaar deel van het image
     std::vector<uint8_t> heap;
     uint32_t             heapCursor = 0x1000;   // laat wat ruimte vooraan
 
-    Space() : image(IMAGE_SIZE, 0), heap(HEAP_SIZE, 0) {}
+    Space() : image(RODATA_SIZE, 0), data(DATA_SIZE, 0), heap(HEAP_SIZE, 0) {}
 
-    uint8_t* imgAt(uint32_t addr) { return image.data() + (addr - IMAGE_BASE); }
+    uint8_t* imgAt(uint32_t addr) { return image.data() + (addr - RODATA_BASE); }
+    uint8_t* dataAt(uint32_t addr) { return data.data() + (addr - DATA_BASE); }
     uint8_t* heapAt(uint32_t addr) { return heap.data() + (addr - HEAP_BASE); }
 
     uint32_t alloc(uint32_t size) {
@@ -116,12 +133,12 @@ int runSelfTest() {
     const uint32_t vtProto  = sp.makeVtable(VT_AREA + 0x400);
     const uint32_t vtPlayer = sp.makeVtable(VT_AREA + 0x500);
 
-    // Een blok in het image dat er met een controle op alleen slot 0 als een
-    // vtable uitziet, maar het niet is.
+    // De twee valkuilen neerleggen: allebei een woord dat naar code wijst,
+    // maar op een adres waar een echte vtable nooit kan staan.
     {
         uint32_t fn = CODE_ADDR;
-        memcpy(sp.imgAt(FAKE_VT_ADDR), &fn, 4);          // slot 0 uitvoerbaar
-        memset(sp.imgAt(FAKE_VT_ADDR) + 4, 0, 28);       // de rest nul
+        memcpy(sp.imgAt(FAKE_VT_UNALIGNED), &fn, 4);
+        memcpy(sp.dataAt(FAKE_VT_WRITABLE), &fn, 4);
     }
 
     // Spelers: alle zestien slots worden gealloceerd, precies zoals
@@ -143,12 +160,14 @@ int runSelfTest() {
     for (uint32_t i = 0; i < 16; ++i)
         sp.put(pl + 8 + i * 4, allSlots[i]);
 
-    // Veel verwijzingen naar het nep-vtable-adres, zodat het bij een te losse
-    // controle bovenaan het histogram zou belanden.
+    // Veel verwijzingen naar allebei, zodat ze bij een te losse controle
+    // bovenaan het histogram zouden belanden.
     {
-        uint32_t block = sp.alloc(FAKE_VT_REFS * 4);
-        for (uint32_t i = 0; i < FAKE_VT_REFS; ++i)
-            sp.put(block + i * 4, FAKE_VT_ADDR);
+        uint32_t block = sp.alloc(FAKE_VT_REFS * 2 * 4);
+        for (uint32_t i = 0; i < FAKE_VT_REFS; ++i) {
+            sp.put(block + i * 8,     FAKE_VT_UNALIGNED);
+            sp.put(block + i * 8 + 4, FAKE_VT_WRITABLE);
+        }
     }
 
     // Teams en prototypes.
@@ -197,11 +216,18 @@ int runSelfTest() {
 
     // --- de adresruimte aan Target aanbieden -----------------------------
     Region imgRegion;
-    imgRegion.base = IMAGE_BASE;
-    imgRegion.size = IMAGE_SIZE;
-    imgRegion.protect = PAGE_EXECUTE_READ;
+    imgRegion.base = RODATA_BASE;
+    imgRegion.size = RODATA_SIZE;
+    imgRegion.protect = PAGE_EXECUTE_READ;    // code en alleen-lezen data
     imgRegion.state = MEM_COMMIT;
     imgRegion.type = MEM_IMAGE;
+
+    Region dataRegion;
+    dataRegion.base = DATA_BASE;
+    dataRegion.size = DATA_SIZE;
+    dataRegion.protect = PAGE_READWRITE;      // schrijfbare data in het image
+    dataRegion.state = MEM_COMMIT;
+    dataRegion.type = MEM_IMAGE;
 
     Region heapRegion;
     heapRegion.base = HEAP_BASE;
@@ -212,8 +238,8 @@ int runSelfTest() {
 
     Target t;
     t.injectTestMemory(/*is64=*/false, IMAGE_BASE, IMAGE_SIZE,
-                       {imgRegion, heapRegion},
-                       {sp.image, sp.heap});
+                       {imgRegion, dataRegion, heapRegion},
+                       {sp.image, sp.data, sp.heap});
 
     char detail[128];
 
@@ -235,16 +261,18 @@ int runSelfTest() {
 
     // --- vtable-histogram ------------------------------------------------
     std::vector<VtableCount> hist = vtableHistogram(t, 24);
-    bool sawBody = false, sawObj = false, sawFake = false;
+    bool sawBody = false, sawObj = false;
+    bool sawUnaligned = false, sawWritable = false;
     for (const VtableCount& v : hist) {
-        if (v.vtable == vtBodyIf)    sawBody = true;
-        if (v.vtable == vtObject)    sawObj = true;
-        if (v.vtable == FAKE_VT_ADDR) sawFake = true;
+        if (v.vtable == vtBodyIf)          sawBody = true;
+        if (v.vtable == vtObject)          sawObj = true;
+        if (v.vtable == FAKE_VT_UNALIGNED) sawUnaligned = true;
+        if (v.vtable == FAKE_VT_WRITABLE)  sawWritable = true;
     }
     check("histogram vindt de Object-vtable", sawObj);
     check("histogram vindt de body-vtable", sawBody);
-    check("histogram verwerpt de opvulling", !sawFake,
-          sawFake ? "opvulling werd als vtable geteld" : "");
+    check("verwerpt opvulling op oneven adres", !sawUnaligned);
+    check("verwerpt kandidaat in schrijfbare data", !sawWritable);
 
     // --- dubbele links ---------------------------------------------------
     std::vector<uint64_t> cand;

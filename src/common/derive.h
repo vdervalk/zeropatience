@@ -92,12 +92,21 @@ std::vector<LinkPair> findDoubleLinks(const Target& t,
 // opeenvolgende floats die zich als hitpoints gedragen, en vrijwel elke
 // instantie heeft ze op dezelfde offset. We scoren kandidaat-vtables op die
 // consistentie in plaats van op naam of op positie in het histogram.
+// Een hoog aandeel alleen is niet genoeg. Een veld dat in elke instantie
+// 1.0 / 1.0 / 1.0 / 1.0 bevat haalt ook 100%, en in een echte meting deden
+// zestien vtables dat tegelijk. Echte hitpoints varieren per objecttype, dus
+// er moeten meerdere verschillende max-waarden voorkomen en die moeten de
+// orde van grootte van hitpoints hebben.
 struct HealthVtable {
     uint64_t vtable = 0;
     int32_t  offset = 0;
     uint32_t confirmations = 0;
     uint32_t sampled = 0;
+    uint32_t distinctMax = 0;
+    uint32_t damaged = 0;
+    float    medianMax = 0;
     double   ratio = 0.0;       // confirmations / sampled
+    double   score = 0.0;       // aandeel gewogen met de variatie
 };
 std::vector<HealthVtable> findHealthVtables(const Target& t,
                                             const std::vector<uint64_t>& candidates,
@@ -133,8 +142,11 @@ std::vector<OwnerChain> findOwnerChains(const Target& t,
 struct HealthBlock {
     int32_t  offset = 0;
     uint32_t confirmations = 0;
+    uint32_t distinctMax = 0;   // hoeveel verschillende max-waarden er voorkomen
+    uint32_t damaged = 0;       // instanties waar current < max
     float    sampleCurrent = 0;
     float    sampleMax = 0;
+    float    medianMax = 0;
 };
 std::vector<HealthBlock> findHealthBlocks(const Target& t,
                                           const std::vector<uint64_t>& bodyObjects,
