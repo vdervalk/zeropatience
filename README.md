@@ -145,12 +145,20 @@ Gebruik `zp-probe64.exe`, ook als het spel 32-bit is: een 64-bit probe kan
 een 32-bit proces gewoon uitlezen. `zp-probe32.exe` is er alleen voor een
 32-bit Windows.
 
-Vindt hij het spel niet automatisch:
+Bij de EA-uitgave draaien er twee processen: `Generals.exe` is een launcher
+die `Game.dat` start, en in `Game.dat` zit de engine. De probe herkent dat
+aan het geheugengebruik (de launcher zit op tientallen MB, de engine op
+honderden) en kiest zelf de juiste, met een regel erbij over wat hij koos.
+
+Vindt hij het spel niet, of wil je zelf kiezen:
 
 ```
 zp-probe64.exe --list          zoek het spel op in de lijst
 zp-probe64.exe --pid 1234      en gebruik dat nummer
 ```
+
+**Generals en Zero Hour zijn losse binaries met eigen offsets.** Speel je
+beide, draai de probe dan één keer per spel en stuur beide rapporten.
 
 ### 4. Het rapport terugsturen
 

@@ -177,12 +177,35 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (matches.size() > 1) {
-            printf("Meerdere kandidaten gevonden, kies er een met --pid:\n");
+            // Bij de EA-uitgave draait er naast de engine ook een launcher
+            // (Generals.exe start Game.dat). Alleen de engine houdt honderden
+            // MB aan objecten vast, dus daar is hij aan te herkennen.
+            std::vector<std::pair<uint64_t, ProcEntry>> ranked;
             for (const auto& m : matches)
-                printf("  --pid %-8lu %s\n", (unsigned long)m.pid, m.name.c_str());
-            return 1;
+                ranked.push_back({privateCommitBytes(m.pid), m});
+            std::sort(ranked.begin(), ranked.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+
+            printf("Meerdere kandidaten gevonden:\n");
+            for (const auto& r : ranked)
+                printf("  --pid %-8lu %-16s %6llu MB geheugen\n",
+                       (unsigned long)r.second.pid, r.second.name.c_str(),
+                       (unsigned long long)(r.first / (1024 * 1024)));
+
+            const uint64_t big = ranked[0].first;
+            const uint64_t next = ranked[1].first;
+            if (big == 0 || (next && big < next * 2)) {
+                printf("\nDe kandidaten liggen te dicht bij elkaar om automatisch te\n"
+                       "kiezen. Kies er zelf een met --pid.\n");
+                return 1;
+            }
+            pid = ranked[0].second.pid;
+            printf("\nGekozen: %s (pid %lu). Dat is de engine; de andere is de\n"
+                   "launcher. Overrulen kan met --pid.\n\n",
+                   ranked[0].second.name.c_str(), (unsigned long)pid);
+        } else {
+            pid = matches[0].pid;
         }
-        pid = matches[0].pid;
         printf("Gevonden: %s (pid %lu)\n", matches[0].name.c_str(), (unsigned long)pid);
     }
 

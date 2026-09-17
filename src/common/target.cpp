@@ -186,6 +186,18 @@ std::vector<ProcEntry> listProcesses() {
     return out;
 }
 
+uint64_t privateCommitBytes(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!h) h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return 0;
+    PROCESS_MEMORY_COUNTERS pmc{};
+    pmc.cb = sizeof(pmc);
+    uint64_t out = 0;
+    if (GetProcessMemoryInfo(h, &pmc, sizeof(pmc))) out = pmc.PagefileUsage;
+    CloseHandle(h);
+    return out;
+}
+
 bool looksLikeGenerals(const std::string& exeName) {
     std::string n;
     n.reserve(exeName.size());

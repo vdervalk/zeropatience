@@ -160,4 +160,9 @@ std::vector<ProcEntry> listProcesses();
 // Bekende procesnamen van Generals / Zero Hour, inclusief de heruitgave.
 bool looksLikeGenerals(const std::string& exeName);
 
+// Privaat vastgelegd geheugen van een proces, in bytes. Nul als het niet op
+// te vragen is. Wordt gebruikt om de echte game van zijn launcher te
+// onderscheiden: een launcher gebruikt tientallen MB, de engine honderden.
+uint64_t privateCommitBytes(DWORD pid);
+
 } // namespace zp
