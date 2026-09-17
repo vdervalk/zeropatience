@@ -54,7 +54,13 @@ struct VtableCount {
 std::vector<VtableCount> vtableHistogram(const Target& t, size_t topN);
 
 // Adressen waar een bepaalde vptr staat, dus de instanties zelf.
-std::vector<uint64_t> instancesOf(const Target& t, uint64_t vtable, size_t maxHits);
+//
+// spread verspreidt de steekproef over het hele geheugen in plaats van de
+// eerste maxHits in adresvolgorde te nemen. Dat is geen kosmetiek: de
+// laagstgelegen instanties zijn vroeg gealloceerd en vaak van hetzelfde type,
+// wat de variatiemeting op hitpoints kunstmatig laag houdt.
+std::vector<uint64_t> instancesOf(const Target& t, uint64_t vtable, size_t maxHits,
+                                  bool spread = false);
 
 // --- dubbele links ------------------------------------------------------
 //
@@ -107,7 +113,13 @@ struct HealthVtable {
     float    medianMax = 0;
     double   ratio = 0.0;       // confirmations / sampled
     double   score = 0.0;       // aandeel gewogen met de variatie
+    bool     passed = false;    // haalde de drempels voor variatie en orde van grootte
+    const char* reject = "";    // zo niet: waarom niet
 };
+//
+// Geeft altijd een regel per kandidaat terug, ook als die de drempels niet
+// haalt. Een lege uitslag is een doodlopend spoor; een uitslag met redenen
+// is te lezen en daarmee te herstellen.
 std::vector<HealthVtable> findHealthVtables(const Target& t,
                                             const std::vector<uint64_t>& candidates,
                                             size_t samplesPerVtable,

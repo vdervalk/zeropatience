@@ -45,6 +45,13 @@ enum : uint32_t {
     BODY_IFACE_VPTR = 0x0060,    // 'this' voor attemptDamage
     BODY_HEALTH     = 0x0090,    // +0x30 vanaf 'this'
 
+    // Lokaas: velden die het hitpoint-patroon halen maar overal dezelfde
+    // waarde hebben. Ze halen het maximale aantal treffers en moeten toch
+    // verliezen van het echte veld, dat variatie tussen objecttypes kent.
+    BODY_DECOY_A    = 0x00A0,
+    BODY_DECOY_B    = 0x00B0,
+    BODY_DECOY_C    = 0x00C0,
+
     OBJECT_SIZE     = 0x0180,
     OBJECT_M_BODY   = 0x0020,
     OBJECT_M_NEXT   = 0x0030,    // valkuil: dubbelgelinkte lijst
@@ -199,6 +206,12 @@ int runSelfTest() {
         sp.put(body + BODY_M_OBJECT, obj);
         sp.put(obj + OBJECT_M_TEAM, teams[i % NUM_PLAYERS]);
 
+        for (uint32_t k = 0; k < 4; ++k) {
+            sp.putf(body + BODY_DECOY_A + k * 4, 1.0f);
+            sp.putf(body + BODY_DECOY_B + k * 4, 100.0f);
+            sp.putf(body + BODY_DECOY_C + k * 4, 5000.0f);
+        }
+
         float mx = 200.0f + (i % 5) * 75.0f;
         sp.putf(body + BODY_HEALTH + 0,  mx * 0.6f);
         sp.putf(body + BODY_HEALTH + 4,  mx);
@@ -309,6 +322,16 @@ int runSelfTest() {
     bool healthOk = !hb.empty() && hb[0].offset == expectHealth;
     snprintf(detail, sizeof(detail), "verwacht +0x%x", (unsigned)expectHealth);
     check("hitpoint-blok op de juiste offset", healthOk, detail);
+
+    // Het lokaas mag de echte hitpoints niet verdringen.
+    {
+        bool decoyWon = false;
+        for (const HealthBlock& b : hb) {
+            if (b.offset == expectHealth) break;
+            if (b.distinctMax <= 1) { decoyWon = true; break; }
+        }
+        check("lokaas verliest van echte hitpoints", !decoyWon && healthOk);
+    }
 
     // De body-module moet herkenbaar zijn aan zijn inhoud, los van structuur.
     std::vector<HealthVtable> hv = findHealthVtables(t, cand, 256, -0x40, 0x300);

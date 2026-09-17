@@ -406,12 +406,6 @@ int main(int argc, char** argv) {
     }
 
     // ------------------------------------------- body-module aan zijn inhoud --
-    //
-    // Niet op naam en niet op structuur, maar op inhoud. Een hoog aandeel
-    // alleen is daarbij niet genoeg: een veld dat overal 1.0 bevat haalt ook
-    // 100%. Echte hitpoints verschillen per objecttype, dus er moet variatie
-    // in de max-waarden zitten en die moeten de orde van grootte van
-    // hitpoints hebben.
     rule("BODY-MODULE HERKENNEN AAN HITPOINTS");
     std::vector<uint64_t> cand;
     for (const VtableCount& v : hist) cand.push_back(v.vtable);
@@ -421,31 +415,37 @@ int main(int argc, char** argv) {
     cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
 
     std::vector<HealthVtable> hv = findHealthVtables(t, cand, 256, -0x40, 0x300);
+    std::map<uint64_t, const HealthVtable*> healthByVtable;
+    for (const HealthVtable& h : hv) healthByVtable[h.vtable] = &h;
+
     if (hv.empty()) {
-        say("Geen enkele vtable heeft instanties met een geloofwaardig\n"
-            "hitpoint-patroon. Zat je wel in een geladen potje?\n");
+        say("Geen kandidaten onderzocht.\n");
     } else {
-        say("%-14s %-9s %-11s %-9s %-10s %-10s %s\n",
-            "VTABLE", "OFFSET", "BEVESTIGD", "VARIATIE", "MEDIAAN", "BESCHADIGD", "SCORE");
+        say("Een hoog aandeel alleen is geen bewijs: een veld dat overal 1.0\n"
+            "bevat haalt ook 100%%. Echte hitpoints verschillen per objecttype,\n"
+            "dus VARIATIE (aantal verschillende max-waarden) telt zwaar mee.\n\n");
+        say("%-14s %-9s %-11s %-9s %-9s %-11s %s\n",
+            "VTABLE", "OFFSET", "BEVESTIGD", "VARIATIE", "MEDIAAN", "BESCHADIGD", "OORDEEL");
         for (const HealthVtable& h : hv) {
             char conf[32];
             snprintf(conf, sizeof(conf), "%u/%u", h.confirmations, h.sampled);
-            say("0x%-12llx %-9s %-11s %-9u %-10.0f %-10u %.2f\n",
+            char verdict[48];
+            if (h.passed) snprintf(verdict, sizeof(verdict), "score %.2f", h.score);
+            else          snprintf(verdict, sizeof(verdict), "afgewezen: %s", h.reject);
+            say("0x%-12llx %-9s %-11s %-9u %-9.0f %-11u %s\n",
                 (unsigned long long)h.vtable, soff(h.offset).c_str(), conf,
-                h.distinctMax, h.medianMax, h.damaged, h.score);
+                h.distinctMax, h.medianMax, h.damaged, verdict);
         }
-        say("\nVARIATIE is het aantal verschillende max-waarden; BESCHADIGD het\n"
-            "aantal instanties waar current onder max staat. Een body-module\n"
-            "hoort beide te laten zien.\n");
     }
 
-    // -------------------------------------------------- links tussen objecten --
+    // -------------------------------------------------- objectlijst als anker --
     //
-    // Een link wordt eenmalig gezocht en daarna gesplitst. De zelf-verwijzende
-    // links zijn geen ruis: Object heeft m_next en m_prev, dus een vtable die
-    // naar zichzelf wijst op twee verschillende offsets IS de objectlijst. Dat
-    // is een positieve vingerafdruk van Object, geen artefact om weg te
-    // gooien zoals v2 deed.
+    // Object is de klasse met m_next en m_prev. Een vtable die op twee
+    // verschillende offsets naar zichzelf wijst, met hoge bevestiging, is dus
+    // Object. Dat is het betrouwbaarste anker dat we zonder RTTI hebben, en
+    // vanaf daar zoeken we gericht in plaats van breed.
+    rule("OBJECTLIJST-VINGERAFDRUK (m_next / m_prev)");
+
     std::vector<uint64_t> linkSources;
     for (const HealthVtable& h : hv) linkSources.push_back(h.vtable);
     for (const VtableCount& v : hist) linkSources.push_back(v.vtable);
@@ -456,45 +456,68 @@ int main(int argc, char** argv) {
     std::vector<LinkPair> allLinks =
         findDoubleLinks(t, linkSources, 32, 0x400, 0x200, /*requireDistinct=*/false);
 
-    std::vector<LinkPair> selfLinks, crossLinks;
-    for (const LinkPair& p : allLinks) {
-        if (p.vtableA == p.vtableB) {
-            if (p.offsetAtoB != p.offsetBtoA) selfLinks.push_back(p);
+    std::map<uint64_t, uint32_t> listScore;
+    {
+        std::vector<LinkPair> selfLinks;
+        for (const LinkPair& p : allLinks)
+            if (p.vtableA == p.vtableB && p.offsetAtoB != p.offsetBtoA)
+                selfLinks.push_back(p);
+
+        if (selfLinks.empty()) {
+            say("Geen dubbelgelinkte lijst gevonden.\n");
         } else {
-            crossLinks.push_back(p);
+            say("%-14s %-10s %-10s %s\n", "VTABLE", "m_next", "m_prev", "BEVESTIGD");
+            for (size_t i = 0; i < selfLinks.size() && i < 12; ++i) {
+                const LinkPair& p = selfLinks[i];
+                say("0x%-12llx %-10s %-10s %u\n",
+                    (unsigned long long)p.vtableA, soff(p.offsetAtoB).c_str(),
+                    soff(p.offsetBtoA).c_str(), p.confirmations);
+            }
+            for (const LinkPair& p : selfLinks)
+                listScore[p.vtableA] = std::max(listScore[p.vtableA], p.confirmations);
         }
     }
 
-    rule("OBJECTLIJST-VINGERAFDRUK (m_next / m_prev)");
-    std::set<uint64_t> listVtables;
-    if (selfLinks.empty()) {
-        say("Geen dubbelgelinkte lijst gevonden.\n");
-    } else {
-        say("%-14s %-10s %-10s %s\n", "VTABLE", "m_next", "m_prev", "BEVESTIGD");
-        for (size_t i = 0; i < selfLinks.size() && i < 12; ++i) {
-            const LinkPair& p = selfLinks[i];
-            say("0x%-12llx %-10s %-10s %u\n",
-                (unsigned long long)p.vtableA, soff(p.offsetAtoB).c_str(),
-                soff(p.offsetBtoA).c_str(), p.confirmations);
-            if (p.confirmations >= 8) listVtables.insert(p.vtableA);
-        }
-        say("\nObject is de klasse met zo'n lijst. Dit is dus een sterke\n"
-            "aanwijzing voor welke vtable Object is.\n");
-    }
+    std::vector<uint64_t> objectCandidates;
+    for (auto& kv : listScore)
+        if (kv.second >= 8) objectCandidates.push_back(kv.first);
+    std::sort(objectCandidates.begin(), objectCandidates.end(),
+              [&](uint64_t a, uint64_t b) { return listScore[a] > listScore[b]; });
+    if (objectCandidates.size() > 4) objectCandidates.resize(4);
 
-    rule("DUBBELE LINKS TUSSEN VERSCHILLENDE KLASSEN");
-    if (crossLinks.empty()) {
-        say("Geen wederzijdse verwijzingen tussen verschillende klassen gevonden.\n");
+    // ------------------------------------------------- gericht zoeken vanaf Object --
+    //
+    // Object is groot, dus m_body kan honderden bytes ver liggen. Een breed
+    // opgezette zoektocht moet die reikwijdte laag houden om betaalbaar te
+    // blijven; een gerichte zoektocht vanaf enkele bekende ankers kan veel
+    // ruimer kijken. Dat is precies waar de vorige versie op strandde.
+    rule("GERICHT ZOEKEN: Object -> body-module");
+    std::vector<LinkPair> targeted;
+    if (objectCandidates.empty()) {
+        say("Geen Object-anker, dus niets om gericht vanaf te zoeken.\n");
     } else {
-        say("%-14s %-10s %-14s %-10s %s\n",
-            "A (vtable)", "A->B", "B (vtable)", "B->A", "BEVESTIGD");
-        for (size_t i = 0; i < crossLinks.size() && i < 30; ++i) {
-            const LinkPair& p = crossLinks[i];
-            say("0x%-12llx %-10s 0x%-12llx %-10s %u%s\n",
-                (unsigned long long)p.vtableA, soff(p.offsetAtoB).c_str(),
-                (unsigned long long)p.vtableB, soff(p.offsetBtoA).c_str(),
-                p.confirmations,
-                listVtables.count(p.vtableB) ? "   <- B is de objectlijst" : "");
+        say("Ankers: ");
+        for (uint64_t v : objectCandidates) say("0x%llx ", (unsigned long long)v);
+        say("\n64 instanties per anker, reikwijdte +/-0x800 vanaf Object.\n\n");
+
+        targeted = findDoubleLinks(t, objectCandidates, 64, 0x800, 0x100,
+                                   /*requireDistinct=*/true);
+        if (targeted.empty()) {
+            say("Geen wederzijdse verwijzing naar een andere klasse gevonden.\n");
+        } else {
+            say("%-14s %-12s %-14s %-12s %-10s %s\n",
+                "Object", "m_body", "body-vtable", "m_object", "BEVESTIGD", "HITPOINTS");
+            for (size_t i = 0; i < targeted.size() && i < 20; ++i) {
+                const LinkPair& p = targeted[i];
+                auto it = healthByVtable.find(p.vtableB);
+                const char* hp = (it == healthByVtable.end()) ? "niet onderzocht"
+                               : it->second->passed            ? "ja"
+                                                               : it->second->reject;
+                say("0x%-12llx %-12s 0x%-12llx %-12s %-10u %s\n",
+                    (unsigned long long)p.vtableA, soff(p.offsetAtoB).c_str(),
+                    (unsigned long long)p.vtableB, soff(p.offsetBtoA).c_str(),
+                    p.confirmations, hp);
+            }
         }
     }
 
@@ -503,62 +526,83 @@ int main(int argc, char** argv) {
 
     uint64_t resolvedBodyVtable   = 0;
     uint64_t resolvedObjectVtable = 0;
-    int32_t  resolvedThisToObject = 0;   // this -> Object      (verwacht negatief)
-    int32_t  resolvedObjectToBody = 0;   // Object::m_body
-    int32_t  resolvedHealthOffset = 0;   // this -> m_currentHealth (verwacht positief)
+    int32_t  resolvedThisToObject = 0;
+    int32_t  resolvedObjectToBody = 0;
+    int32_t  resolvedHealthOffset = 0;
     uint32_t resolvedHealthConf   = 0;
     uint32_t resolvedLinkConf     = 0;
     const char* resolvedNote      = "";
 
-    // Beste geval: de body-module heeft een link naar de klasse die de
-    // objectlijst draagt. Dan wijzen twee onafhankelijke aanwijzingen naar
-    // dezelfde conclusie. Anders nemen we de sterkste link die er is.
+    // Voorkeursvolgorde: eerst een link waarvan de body-kant ook op hitpoints
+    // slaagt, want dan wijzen twee onafhankelijke aanwijzingen dezelfde kant
+    // op. Pas als die er niet is, de sterkste link zonder die bevestiging.
     for (int pass = 0; pass < 2 && !resolvedBodyVtable; ++pass) {
-        const bool needList = (pass == 0);
-        for (const HealthVtable& h : hv) {
-            const LinkPair* best = nullptr;
-            for (const LinkPair& p : crossLinks) {
-                if (p.vtableA != h.vtable) continue;
-                if (needList && !listVtables.count(p.vtableB)) continue;
-                if (!best || p.confirmations > best->confirmations) best = &p;
-            }
-            if (!best) continue;
+        for (const LinkPair& p : targeted) {
+            auto it = healthByVtable.find(p.vtableB);
+            const bool hasHealth = (it != healthByVtable.end() && it->second->passed);
+            if (pass == 0 && !hasHealth) continue;
+            if (p.confirmations < 4) continue;
 
-            resolvedBodyVtable   = h.vtable;
-            resolvedObjectVtable = best->vtableB;
-            resolvedThisToObject = best->offsetAtoB;
-            resolvedObjectToBody = best->offsetBtoA;
-            resolvedHealthOffset = h.offset;
-            resolvedHealthConf   = h.confirmations;
-            resolvedLinkConf     = best->confirmations;
-            resolvedNote = needList
-                ? "hitpoints en objectlijst wijzen naar dezelfde conclusie"
-                : "alleen op de sterkste link; de objectlijst bevestigt niets";
+            resolvedObjectVtable = p.vtableA;
+            resolvedBodyVtable   = p.vtableB;
+            resolvedObjectToBody = p.offsetAtoB;
+            resolvedThisToObject = p.offsetBtoA;
+            resolvedLinkConf     = p.confirmations;
+            if (hasHealth) {
+                resolvedHealthOffset = it->second->offset;
+                resolvedHealthConf   = it->second->confirmations;
+                resolvedNote = "objectlijst en hitpoints bevestigen elkaar";
+            } else {
+                resolvedNote = "alleen op de objectlijst; hitpoints bevestigen niets";
+            }
             break;
         }
     }
 
     if (!resolvedBodyVtable) {
         say("De body-module is niet vastgesteld.\n\n");
-        if (hv.empty())
-            say("Er is geen enkele vtable met een geloofwaardig hitpoint-patroon.\n"
-                "Meest waarschijnlijke oorzaak: de probe draaide in een menu in\n"
-                "plaats van in een geladen potje.\n");
+        if (objectCandidates.empty())
+            say("Er is geen Object-anker gevonden. Zat je wel in een geladen potje?\n");
         else
-            say("Er zijn wel kandidaten met hitpoints, maar geen daarvan heeft\n"
-                "een wederzijdse verwijzing naar een andere klasse. Stuur het\n"
-                "rapport terug, dan kijk ik ernaar.\n");
+            say("Het Object-anker staat vast, maar er loopt geen bevestigde\n"
+                "wederzijdse verwijzing naar een andere klasse. De tabellen\n"
+                "hierboven laten zien hoe ver het kwam; stuur ze terug.\n");
     } else {
         say("grondslag         : %s\n\n", resolvedNote);
         say("ActiveBody-vtable : 0x%llx  (%s)\n",
             (unsigned long long)resolvedBodyVtable, rva(t, resolvedBodyVtable).c_str());
         say("Object-vtable     : 0x%llx  (%s)\n",
             (unsigned long long)resolvedObjectVtable, rva(t, resolvedObjectVtable).c_str());
-        say("bewijs            : %u hitpoint-bevestigingen, %u link-bevestigingen\n",
-            resolvedHealthConf, resolvedLinkConf);
+        say("bewijs            : %u link-bevestigingen", resolvedLinkConf);
+        if (resolvedHealthConf) say(", %u hitpoint-bevestigingen", resolvedHealthConf);
+        say("\n");
+
+        // ActiveBody erft van vier polymorfe bases, dus het object hoort
+        // precies vier vptrs te hebben. Dat is een onafhankelijke controle.
+        uint64_t bodyCount = 0;
+        for (const VtableCount& v : hist)
+            if (v.vtable == resolvedBodyVtable) bodyCount = v.count;
+        // Object niet meetellen: klassen met toevallig hetzelfde aantal
+        // instanties zouden anders als vptrs van hetzelfde object gelden.
+        size_t siblings = 0;
+        for (const VtableCount& v : hist)
+            if (v.count == bodyCount && v.vtable != resolvedObjectVtable) siblings++;
+        say("vptr-groep        : %zu vtables met %llu instanties\n",
+            siblings, (unsigned long long)bodyCount);
+        say("                    ActiveBody erft van vier polymorfe bases en heeft\n"
+            "                    dus vier vptrs. Tellen op gelijk aantal instanties\n"
+            "                    is echter grofmazig: het voegt klassen samen die\n"
+            "                    toevallig even vaak voorkomen en splitst klassen\n"
+            "                    waarvan niet elke vptr in de lijst staat. Vier is\n"
+            "                    een bevestiging, een ander getal geen tegenbewijs.%s\n",
+            siblings == 4 ? "\n                    Hier: vier, dus bevestigd." : "");
+
         say("\nOffsets vanaf 'this', de pointer die de detour binnenkrijgt:\n");
         say("  this -> Object          %s\n", soff(resolvedThisToObject).c_str());
-        say("  this -> m_currentHealth %s\n", soff(resolvedHealthOffset).c_str());
+        if (resolvedHealthConf)
+            say("  this -> m_currentHealth %s\n", soff(resolvedHealthOffset).c_str());
+        else
+            say("  this -> m_currentHealth onbekend\n");
         say("\nOffset vanaf het begin van Object:\n");
         say("  Object::m_body          %s\n", soff(resolvedObjectToBody).c_str());
 
@@ -566,9 +610,10 @@ int main(int argc, char** argv) {
         say("  this -> Object is negatief    %s\n",
             resolvedThisToObject < 0 ? "ja, zoals verwacht"
                                      : "NEE -- dit is verdacht");
-        say("  this -> hitpoints is positief %s\n",
-            resolvedHealthOffset > 0 ? "ja, zoals verwacht"
-                                     : "NEE -- dit is verdacht");
+        if (resolvedHealthConf)
+            say("  this -> hitpoints is positief %s\n",
+                resolvedHealthOffset > 0 ? "ja, zoals verwacht"
+                                         : "NEE -- dit is verdacht");
     }
 
     // ------------------------------------------------- ActiveBody-instanties --

@@ -28,10 +28,24 @@
 // (met m_object), dan de vptr van het tweede basis-subobject, en daarachter
 // de eigen velden van de afgeleide klasse (met de hitpoints).
 enum : int {
+    // ActiveBody erft van vier polymorfe bases (MemoryPoolObject, Snapshot,
+    // BehaviorModuleInterface, BodyModuleInterface) en heeft dus vier vptrs.
+    // Het testdoel bootst dat na, zodat de vptr-groepscontrole iets voorstelt.
     BODY_SIZE        = 0x200,
+    BODY_VPTR_SNAP   = 0x0008,
     BODY_M_OBJECT    = 0x0010,   // dus -0x70 vanaf 'this'
+    BODY_VPTR_BEHAV  = 0x0040,
     BODY_IFACE_VPTR  = 0x0080,   // 'this' voor attemptDamage
     BODY_HEALTH      = 0x00B0,   // dus +0x30 vanaf 'this'
+
+    // Lokaas: vier floats die het hitpoint-patroon halen maar in elke
+    // instantie dezelfde waarde hebben. Dit is de valkuil waar de derde
+    // meting op strandde: zulke velden scoren het maximale aantal treffers
+    // en verdrongen de echte hitpoints uit de lijst voordat die beoordeeld
+    // werden. Alleen variatie tussen objecttypes onderscheidt de twee.
+    BODY_DECOY_A     = 0x00D0,
+    BODY_DECOY_B     = 0x00E0,
+    BODY_DECOY_C     = 0x00F0,
 
     OBJECT_SIZE      = 0x300,
     OBJECT_M_BODY    = 0x0040,
@@ -60,6 +74,8 @@ typedef void (*Fn)();
 // Vtables als globals: die landen in het image, net als bij de echte game.
 static Fn g_vtObject[]      = {fn0, fn1, fn2, fn3, fn4, fn5};
 static Fn g_vtBodyPrimary[] = {fn1, fn2, fn3, fn0, fn4, fn5};
+static Fn g_vtBodySnap[]    = {fn0, fn3, fn2, fn5, fn1, fn4};
+static Fn g_vtBodyBehav[]   = {fn4, fn1, fn5, fn3, fn0, fn2};
 static Fn g_vtBodyIface[]   = {fn2, fn3, fn0, fn1, fn5, fn4};
 static Fn g_vtTeam[]        = {fn3, fn0, fn1, fn2, fn4, fn5};
 static Fn g_vtProto[]       = {fn4, fn5, fn0, fn1, fn2, fn3};
@@ -126,6 +142,8 @@ int main() {
 
         put(obj, 0, g_vtObject);
         put(body, 0, g_vtBodyPrimary);
+        put(body, BODY_VPTR_SNAP,  g_vtBodySnap);
+        put(body, BODY_VPTR_BEHAV, g_vtBodyBehav);
         put(body, BODY_IFACE_VPTR, g_vtBodyIface);
 
         uint8_t* iface = (uint8_t*)body + BODY_IFACE_VPTR;   // de 'this' van de hook
@@ -133,6 +151,13 @@ int main() {
         put(obj,  OBJECT_M_BODY, iface);   // Object bewaart de subobject-pointer
         put(body, BODY_M_OBJECT, obj);     // en de module wijst terug
         put(obj,  OBJECT_M_TEAM, teams[i % NUM_PLAYERS]);
+
+        // Drie lokaasvelden met een constante waarde.
+        for (int k = 0; k < 4; ++k) {
+            putf(body, BODY_DECOY_A + k * 4, 1.0f);
+            putf(body, BODY_DECOY_B + k * 4, 100.0f);
+            putf(body, BODY_DECOY_C + k * 4, 5000.0f);
+        }
 
         float mx = 100.0f + (i % 7) * 50.0f;
         putf(body, BODY_HEALTH + 0,  mx * (0.4f + 0.05f * (i % 10)));  // current

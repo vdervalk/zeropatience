@@ -157,8 +157,14 @@ std::vector<VtableCount> vtableHistogram(const Target& t, size_t topN) {
     return out;
 }
 
-std::vector<uint64_t> instancesOf(const Target& t, uint64_t vtable, size_t maxHits) {
-    std::vector<uint64_t> out;
+std::vector<uint64_t> instancesOf(const Target& t, uint64_t vtable, size_t maxHits,
+                                  bool spread) {
+    // Zonder spread stoppen we zodra we genoeg hebben. Met spread verzamelen
+    // we ruimer en dunnen daarna uit, zodat de steekproef het hele geheugen
+    // bestrijkt in plaats van alleen de vroegst gealloceerde objecten.
+    const size_t collectTarget = spread ? maxHits * 16 : maxHits;
+
+    std::vector<uint64_t> all;
     const size_t ps = t.ptrSize();
     for (const Snapshot& s : t.snapshots()) {
         if (!s.region || s.region->type != MEM_PRIVATE) continue;
@@ -170,10 +176,21 @@ std::vector<uint64_t> instancesOf(const Target& t, uint64_t vtable, size_t maxHi
             if (ps == 4) { uint32_t x; memcpy(&x, d + i, 4); v = x; }
             else         { memcpy(&v, d + i, 8); }
             if (v != vtable) continue;
-            out.push_back(s.base + i);
-            if (out.size() >= maxHits) return out;
+            all.push_back(s.base + i);
+            if (all.size() >= collectTarget) goto done;
         }
     }
+done:
+    if (!spread || all.size() <= maxHits) {
+        if (all.size() > maxHits) all.resize(maxHits);
+        return all;
+    }
+
+    std::vector<uint64_t> out;
+    out.reserve(maxHits);
+    const double step = (double)all.size() / (double)maxHits;
+    for (size_t k = 0; k < maxHits; ++k)
+        out.push_back(all[(size_t)(k * step)]);
     return out;
 }
 
@@ -335,10 +352,19 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
 
         out.push_back(b);
     }
-    std::sort(out.begin(), out.end(), [](const HealthBlock& a, const HealthBlock& b) {
-        return a.confirmations > b.confirmations;
+    // Rangschikken op kwaliteit, niet op ruwe treffers. Dat onderscheid is
+    // fataal gebleken: een veld dat in elke instantie 1.0 bevat haalt het
+    // maximale aantal treffers en verdrong de echte hitpoints uit de lijst
+    // voordat het kwaliteitsfilter er ooit naar keek.
+    auto quality = [](const HealthBlock& b) {
+        if (!b.confirmations) return 0.0;
+        double variety = (double)b.distinctMax / (double)b.confirmations;
+        return (double)b.confirmations * (0.1 + 0.9 * variety);
+    };
+    std::sort(out.begin(), out.end(), [&](const HealthBlock& a, const HealthBlock& b) {
+        return quality(a) > quality(b);
     });
-    if (out.size() > 16) out.resize(16);
+    if (out.size() > 32) out.resize(32);
     return out;
 }
 
@@ -350,40 +376,52 @@ std::vector<HealthVtable> findHealthVtables(const Target& t,
     std::vector<HealthVtable> out;
 
     for (uint64_t vt : candidates) {
-        std::vector<uint64_t> insts = instancesOf(t, vt, samplesPerVtable);
+        std::vector<uint64_t> insts =
+            instancesOf(t, vt, samplesPerVtable, /*spread=*/true);
         if (insts.size() < 8) continue;   // te weinig om iets over te zeggen
 
         std::vector<HealthBlock> hb = findHealthBlocks(t, insts, fromOffset, toOffset);
+        if (hb.empty()) continue;
 
-        // Kies niet het blok met de meeste treffers, maar het blok dat zich
-        // het meest als hitpoints gedraagt. Een veld dat overal dezelfde
-        // waarde heeft is geen health, hoe vaak het ook matcht.
+        // Het beste blok dat de drempels haalt; haalt niets ze, dan het beste
+        // blok sowieso, met de reden erbij. Zwijgen bij een mislukking maakt
+        // het spoor doodlopend.
         const HealthBlock* best = nullptr;
         double bestScore = 0.0;
         for (const HealthBlock& b : hb) {
-            if (b.medianMax < 10.0f) continue;      // te klein voor hitpoints
-            if (b.distinctMax < 4) continue;        // geen variatie tussen objecttypes
+            if (b.medianMax < 10.0f) continue;
+            if (b.distinctMax < 4) continue;
             double ratio = (double)b.confirmations / (double)insts.size();
             double variety = (double)b.distinctMax / (double)b.confirmations;
             double sc = ratio * (0.25 + 0.75 * variety);
             if (sc > bestScore) { bestScore = sc; best = &b; }
         }
-        if (!best) continue;
 
         HealthVtable h;
         h.vtable = vt;
+        h.sampled = (uint32_t)insts.size();
+
+        if (best) {
+            h.passed = true;
+            h.score = bestScore;
+        } else {
+            best = &hb[0];
+            h.passed = false;
+            h.reject = (best->medianMax < 10.0f) ? "mediaan te klein"
+                                                 : "te weinig variatie";
+        }
+
         h.offset = best->offset;
         h.confirmations = best->confirmations;
-        h.sampled = (uint32_t)insts.size();
         h.distinctMax = best->distinctMax;
         h.damaged = best->damaged;
         h.medianMax = best->medianMax;
         h.ratio = (double)h.confirmations / (double)h.sampled;
-        h.score = bestScore;
         out.push_back(h);
     }
 
     std::sort(out.begin(), out.end(), [](const HealthVtable& a, const HealthVtable& b) {
+        if (a.passed != b.passed) return a.passed;
         return a.score > b.score;
     });
     return out;
