@@ -6,6 +6,7 @@
 // ons eigen proces is ook daar geldig.
 
 #include "../common/target.h"
+#include "../common/inject.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -13,80 +14,6 @@
 #include <vector>
 
 using namespace zp;
-
-static std::string dllPathNextToMe(const char* name) {
-    char self[MAX_PATH] = {0};
-    GetModuleFileNameA(nullptr, self, sizeof(self));
-    std::string p = self;
-    size_t slash = p.find_last_of("\\/");
-    if (slash != std::string::npos) p.resize(slash + 1);
-    return p + name;
-}
-
-static bool inject(DWORD pid, const std::string& dll, std::string* err) {
-    HANDLE h = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-                           PROCESS_VM_OPERATION | PROCESS_VM_WRITE |
-                           PROCESS_VM_READ, FALSE, pid);
-    if (!h) {
-        *err = "OpenProcess faalde (code " + std::to_string(GetLastError()) +
-               "). Start de injector als administrator.";
-        return false;
-    }
-
-    const SIZE_T bytes = dll.size() + 1;
-    void* remote = VirtualAllocEx(h, nullptr, bytes, MEM_COMMIT | MEM_RESERVE,
-                                  PAGE_READWRITE);
-    if (!remote) {
-        *err = "VirtualAllocEx faalde (code " + std::to_string(GetLastError()) + ")";
-        CloseHandle(h);
-        return false;
-    }
-
-    SIZE_T written = 0;
-    if (!WriteProcessMemory(h, remote, dll.c_str(), bytes, &written) ||
-        written != bytes) {
-        *err = "kon het DLL-pad niet schrijven";
-        VirtualFreeEx(h, remote, 0, MEM_RELEASE);
-        CloseHandle(h);
-        return false;
-    }
-
-    FARPROC loadLibrary = GetProcAddress(GetModuleHandleA("kernel32.dll"),
-                                         "LoadLibraryA");
-    if (!loadLibrary) {
-        *err = "LoadLibraryA niet gevonden";
-        VirtualFreeEx(h, remote, 0, MEM_RELEASE);
-        CloseHandle(h);
-        return false;
-    }
-
-    // LoadLibraryA neemt een pointer en geeft een handle terug, dus de vorm
-    // past op een threadfunctie. De cast is opzet.
-    LPTHREAD_START_ROUTINE start =
-        reinterpret_cast<LPTHREAD_START_ROUTINE>(reinterpret_cast<void*>(loadLibrary));
-    HANDLE th = CreateRemoteThread(h, nullptr, 0, start, remote, 0, nullptr);
-    if (!th) {
-        *err = "CreateRemoteThread faalde (code " +
-               std::to_string(GetLastError()) + ")";
-        VirtualFreeEx(h, remote, 0, MEM_RELEASE);
-        CloseHandle(h);
-        return false;
-    }
-
-    WaitForSingleObject(th, 15000);
-    DWORD module = 0;
-    GetExitCodeThread(th, &module);
-    CloseHandle(th);
-    VirtualFreeEx(h, remote, 0, MEM_RELEASE);
-    CloseHandle(h);
-
-    if (module == 0) {
-        *err = "LoadLibrary in het spel gaf NULL terug; staat zp-freeze.dll "
-               "naast de injector en is het 32-bit?";
-        return false;
-    }
-    return true;
-}
 
 static void usage() {
     printf(
@@ -119,7 +46,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (dll.empty()) dll = dllPathNextToMe("zp-freeze.dll");
+    if (dll.empty()) dll = pathNextToExe("zp-freeze.dll");
     if (GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
         printf("zp-freeze.dll niet gevonden op:\n  %s\n\n"
                "Zet de DLL naast de injector, of geef --dll <pad>.\n", dll.c_str());
@@ -157,7 +84,7 @@ int main(int argc, char** argv) {
 
     printf("Injecteren in pid %lu...\n", (unsigned long)pid);
     std::string err;
-    if (!inject(pid, dll, &err)) {
+    if (!injectDll(pid, dll, &err)) {
         printf("MISLUKT: %s\n", err.c_str());
         return 1;
     }

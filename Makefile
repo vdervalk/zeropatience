@@ -22,7 +22,7 @@ PROBE  := src/probe/main.cpp src/probe/selftest.cpp $(COMMON)
 .PHONY: all probe32 probe64 trainer clean
 all: probe32 probe64 trainer
 
-trainer: $(BUILD)/zp-freeze.dll $(BUILD)/zp-inject.exe
+trainer: $(BUILD)/zp-freeze.dll $(BUILD)/zp-trainer.exe $(BUILD)/zp-inject.exe
 
 probe32: $(BUILD)/zp-probe32.exe
 probe64: $(BUILD)/zp-probe64.exe
@@ -34,7 +34,8 @@ $(BUILD)/zp-probe64.exe: $(PROBE) | $(BUILD)
 	$(CXX64) $(CXXFLAGS) -o $@ $(PROBE) $(LDLIBS)
 
 FREEZE := src/freeze/dll.cpp src/freeze/resolve.cpp $(COMMON)
-INJECT := src/inject/main.cpp src/common/target.cpp
+INJECT := src/inject/main.cpp src/common/target.cpp src/common/inject.cpp
+GUI    := src/gui/main.cpp src/common/target.cpp src/common/inject.cpp
 
 # -static-libgcc en -static-libstdc++ zodat er geen runtime-DLL's naast
 # hoeven te staan; de DLL wordt in een vreemd proces geladen en kan niet op
@@ -44,6 +45,14 @@ $(BUILD)/zp-freeze.dll: $(FREEZE) | $(BUILD)
 
 $(BUILD)/zp-inject.exe: $(INJECT) | $(BUILD)
 	$(CXX32) $(CXXFLAGS) -o $@ $(INJECT) $(LDLIBS)
+
+# De manifest-resource vraagt om verhoogde rechten en om de moderne
+# besturingselementen. -mwindows onderdrukt het consolevenster.
+$(BUILD)/app.res: src/gui/app.rc src/gui/app.manifest | $(BUILD)
+	i686-w64-mingw32-windres -I src/gui -O coff -o $@ src/gui/app.rc
+
+$(BUILD)/zp-trainer.exe: $(GUI) $(BUILD)/app.res | $(BUILD)
+	$(CXX32) $(CXXFLAGS) -mwindows -o $@ $(GUI) $(BUILD)/app.res 		$(LDLIBS) -lcomctl32
 
 $(BUILD):
 	mkdir -p $(BUILD)

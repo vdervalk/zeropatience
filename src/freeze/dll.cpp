@@ -18,10 +18,12 @@
 // zetten. Geen instructies decoderen, geen halve instructie overschreven.
 
 #include "resolve.h"
+#include "../common/shared.h"
 
 #include <windows.h>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 
 using namespace zp;
 
@@ -30,7 +32,35 @@ using namespace zp;
 static Resolved   g_r;
 static bool       g_enabled = false;
 static bool       g_hooked = false;
-static HANDLE     g_console = nullptr;
+static HANDLE     g_console = nullptr;   // alleen als de mapping niet lukt
+static HANDLE     g_mapping = nullptr;
+static Shared*    g_shared = nullptr;
+
+// De GUI leest dit. Lukt de mapping niet, dan valt alles terug op een console,
+// zodat er nooit een stille mislukking is.
+static bool openShared() {
+    char name[128];
+    sharedName(GetCurrentProcessId(), name, sizeof(name));
+    g_mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+                                   0, sizeof(Shared), name);
+    if (!g_mapping) return false;
+    g_shared = (Shared*)MapViewOfFile(g_mapping, FILE_MAP_ALL_ACCESS, 0, 0,
+                                      sizeof(Shared));
+    if (!g_shared) {
+        CloseHandle(g_mapping);
+        g_mapping = nullptr;
+        return false;
+    }
+    memset(g_shared, 0, sizeof(Shared));
+    g_shared->magic = SHARED_MAGIC;
+    g_shared->version = SHARED_VERSION;
+    g_shared->state = STATE_STARTING;
+    return true;
+}
+
+static void setState(uint32_t st) {
+    if (g_shared) g_shared->state = st;
+}
 
 extern "C" {
 void* g_original = nullptr;             // de echte attemptDamage
@@ -55,6 +85,19 @@ static void logf(const char* fmt, ...) {
     if (g_console) {
         DWORD written = 0;
         WriteConsoleA(g_console, buf, (DWORD)strlen(buf), &written, nullptr);
+    }
+    if (g_shared) {
+        // Aanvullen tot de buffer vol is. Afkappen in plaats van rondschrijven:
+        // wat er misgaat staat aan het begin, niet aan het eind.
+        size_t n = strlen(buf);
+        uint32_t used = g_shared->logLength;
+        if (used < SHARED_LOG_BYTES - 1) {
+            size_t room = SHARED_LOG_BYTES - 1 - used;
+            if (n > room) n = room;
+            memcpy(g_shared->log + used, buf, n);
+            g_shared->log[used + n] = 0;
+            g_shared->logLength = (uint32_t)(used + n);
+        }
     }
     OutputDebugStringA(buf);
 }
@@ -215,7 +258,9 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
     void* local = *(void**)((const char*)pl + g_r.localPlayerOffset);
     if (!ptrOk(local)) return 0;
 
-    return owner == local ? 1 : 0;
+    if (owner != local) return 0;
+    if (g_shared) g_shared->blockedCount++;
+    return 1;
 }
 
 // ----------------------------------------------------------------- de hook --
@@ -244,20 +289,13 @@ static void removeHook() {
 // ------------------------------------------------------------ hoofdverloop --
 
 static void banner() {
+    logf("zeropatience - health-freeze voor Generals / Zero Hour\n");
     logf("\n");
-    logf("  zeropatience - health-freeze voor Generals / Zero Hour\n");
-    logf("  ------------------------------------------------------\n");
-    logf("  F10  onkwetsbaarheid aan of uit\n");
-    logf("  F11  status tonen\n");
-    logf("  F12  hook verwijderen en dit venster loskoppelen\n");
-    logf("\n");
-    logf("  Alleen bedoeld voor skirmish en campagne. In een potje tegen\n");
-    logf("  andere mensen verpest dit hun match.\n");
-    logf("\n");
-    logf("  LET OP: er zit geen automatische controle op netwerkpotjes in.\n");
-    logf("  Die zou een adres vereisen dat nog niet betrouwbaar te vinden is,\n");
-    logf("  en een controle die soms werkt is erger dan geen controle. Het is\n");
-    logf("  dus aan jou om dit uit te laten in multiplayer.\n");
+    logf("Alleen bedoeld voor skirmish en campagne. In een potje tegen andere\n");
+    logf("mensen verpest dit hun match, en er zit geen automatische controle\n");
+    logf("op netwerkpotjes in. Die zou een adres vereisen dat in deze build\n");
+    logf("niet betrouwbaar te vinden is, en een controle die soms werkt is\n");
+    logf("erger dan geen controle: dan ga je erop vertrouwen.\n");
     logf("\n");
 }
 
@@ -276,19 +314,27 @@ static void status() {
 }
 
 static DWORD WINAPI worker(LPVOID) {
-    AllocConsole();
-    SetConsoleTitleA("zeropatience");
-    g_console = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!openShared()) {
+        // Zonder gedeeld geheugen is er geen GUI om naartoe te praten, dus
+        // dan maar een console. Stil mislukken is geen optie.
+        AllocConsole();
+        SetConsoleTitleA("zeropatience");
+        g_console = GetStdHandle(STD_OUTPUT_HANDLE);
+        logf("[zp] geen gedeeld geheugen; terugval op dit venster.\n");
+    }
     banner();
 
+    setState(STATE_CHECKING);
     logf("[zp] thunk controleren...\n");
     if (!selfCheckThunk()) {
         logf("\n[zp] AFGEBROKEN: de aanroepconventie van de thunk klopt niet.\n");
         logf("[zp] Er wordt niets gehookt. Dit zou het spel laten crashen.\n\n");
+        setState(STATE_FAILED);
         return 0;
     }
     logf("[zp] thunk in orde: doorgeven en blokkeren laten de stack terecht.\n\n");
 
+    setState(STATE_RESOLVING);
     logf("[zp] offsets bepalen...\n");
     // Ruim genomen. Een eerdere poging met 192 MB mislukte: het spel houdt
     // honderden MB aan geheugen vast, dus met een krap budget valt precies de
@@ -304,6 +350,7 @@ static DWORD WINAPI worker(LPVOID) {
         logf("[zp] Meest waarschijnlijke oorzaak: geinjecteerd terwijl je in een\n");
         logf("[zp] menu zat. Laad eerst een skirmish met een paar eigen units,\n");
         logf("[zp] en injecteer dan.\n");
+        setState(STATE_FAILED);
         return 0;
     }
 
@@ -313,36 +360,70 @@ static DWORD WINAPI worker(LPVOID) {
 
     if (!installHook()) {
         logf("[zp] MISLUKT: kan het vtable-slot niet schrijven\n");
+        setState(STATE_FAILED);
         return 0;
     }
     g_hooked = true;
     g_enabled = true;
-    logf("[zp] hook geplaatst, onkwetsbaarheid staat AAN. F10 schakelt.\n");
+    logf("[zp] hook geplaatst, onkwetsbaarheid staat AAN.\n");
     status();
 
-    bool f10 = false, f11 = false, f12 = false;
+    if (g_shared) {
+        g_shared->hooked = 1;
+        g_shared->enabled = 1;
+        g_shared->bodyVtable   = (uint32_t)g_r.bodyVtable;
+        g_shared->objectVtable = (uint32_t)g_r.objectVtable;
+        g_shared->thisToObject = g_r.thisToObject;
+        g_shared->healthOffset = g_r.healthOffset;
+        g_shared->objectToTeam = g_r.objectToTeam;
+        g_shared->teamToProto  = g_r.teamToProto;
+        g_shared->protoToPlayer = g_r.protoToPlayer;
+        g_shared->chainPlayers = g_r.chainPlayers;
+        g_shared->healthConfirmations = g_r.healthConfirmations;
+        g_shared->linkConfirmations = g_r.linkConfirmations;
+    }
+    setState(STATE_READY);
+
+    bool hotkeyDown = false;
     for (;;) {
         Sleep(30);
 
-        bool now10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-        if (now10 && !f10) {
-            g_enabled = !g_enabled;
-            logf("[zp] onkwetsbaarheid: %s\n", g_enabled ? "AAN" : "uit");
-        }
-        f10 = now10;
+        if (g_shared) {
+            // De GUI mag aan- en uitzetten. Alleen overnemen als het echt
+            // verandert, anders overschrijft de GUI elke ronde de sneltoets.
+            const bool want = g_shared->enabled != 0;
+            if (want != g_enabled) {
+                g_enabled = want;
+                logf("[zp] onkwetsbaarheid: %s\n", g_enabled ? "AAN" : "uit");
+            }
 
-        bool now11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
-        if (now11 && !f11) status();
-        f11 = now11;
-
-        bool now12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-        if (now12 && !f12) {
-            g_enabled = false;
-            removeHook();
-            logf("[zp] hook verwijderd. Je kunt dit venster sluiten.\n");
-            return 0;
+            if (g_shared->requestUnhook) {
+                g_enabled = false;
+                removeHook();
+                g_shared->hooked = 0;
+                g_shared->enabled = 0;
+                g_shared->requestUnhook = 0;
+                setState(STATE_DETACHED);
+                logf("[zp] hook verwijderd op verzoek van de GUI.\n");
+                return 0;
+            }
         }
-        f12 = now12;
+
+        // De sneltoets is instelbaar omdat de voor de hand liggende toetsen
+        // bezet zijn: F12 is standaard Steam's screenshot en F10 opent het
+        // venstermenu van Windows.
+        const uint32_t vk = g_shared ? g_shared->hotkeyVk : VK_F10;
+        if (vk) {
+            const bool down = (GetAsyncKeyState((int)vk) & 0x8000) != 0;
+            if (down && !hotkeyDown) {
+                g_enabled = !g_enabled;
+                if (g_shared) g_shared->enabled = g_enabled ? 1 : 0;
+                logf("[zp] onkwetsbaarheid: %s\n", g_enabled ? "AAN" : "uit");
+            }
+            hotkeyDown = down;
+        } else {
+            hotkeyDown = false;
+        }
     }
 }
 
