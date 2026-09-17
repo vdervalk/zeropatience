@@ -59,6 +59,11 @@ enum : uint32_t {
     OBJECT_M_PREV   = 0x0034,
     OBJECT_M_TEAM   = 0x00A0,
 
+    // Valstrik: een tweede teamveld dat altijd naar dezelfde speler leidt.
+    // Zo'n keten haalt evenveel bevestigingen als de juiste en moet toch
+    // verliezen, want hij levert maar een speler op.
+    OBJECT_M_DECOY  = 0x00B0,
+
     TEAM_SIZE       = 0x0040,
     TEAM_M_PROTO    = 0x0010,
 
@@ -208,6 +213,15 @@ int runSelfTest() {
         teams.push_back(team);
     }
 
+    // Het valstrik-team: elk object wijst er ook naar, en het komt altijd
+    // uit bij dezelfde speler.
+    uint32_t decoyProto = sp.alloc(PROTO_SIZE);
+    sp.put(decoyProto, vtProto);
+    sp.put(decoyProto + PROTO_M_OWNER, players[0]);
+    uint32_t decoyTeam = sp.alloc(TEAM_SIZE);
+    sp.put(decoyTeam, vtTeam);
+    sp.put(decoyTeam + TEAM_M_PROTO, decoyProto);
+
     // Objecten met hun body-module, dubbel gelinkt.
     std::vector<uint32_t> objectAddrs;
     for (uint32_t i = 0; i < NUM_OBJECTS; ++i) {
@@ -223,6 +237,7 @@ int runSelfTest() {
         sp.put(obj + OBJECT_M_BODY, iface);
         sp.put(body + BODY_M_OBJECT, obj);
         sp.put(obj + OBJECT_M_TEAM, teams[i % NUM_PLAYERS]);
+        sp.put(obj + OBJECT_M_DECOY, decoyTeam);
 
         for (uint32_t k = 0; k < 4; ++k) {
             sp.putf(body + BODY_DECOY_A + k * 4, 1.0f);
@@ -378,7 +393,8 @@ int runSelfTest() {
     std::vector<uint64_t> objects = instancesOf(t, vtObject, 64);
     std::vector<uint64_t> knownPlayers(players.begin(), players.end());
     std::vector<OwnerChain> chains =
-        findOwnerChains(t, objects, knownPlayers, 0x400, 0x80, 0x200);
+        findOwnerChains(t, objects, knownPlayers, players[LOCAL_PLAYER],
+                        0x400, 0x80, 0x200);
     bool chainOk = !chains.empty() &&
                    chains[0].objectToTeam  == OBJECT_M_TEAM &&
                    chains[0].teamToProto   == TEAM_M_PROTO &&
@@ -386,6 +402,28 @@ int runSelfTest() {
     snprintf(detail, sizeof(detail), "verwacht +0x%x / +0x%x / +0x%x",
              (unsigned)OBJECT_M_TEAM, (unsigned)TEAM_M_PROTO, (unsigned)PROTO_M_OWNER);
     check("eigenaarsketen volledig afgeleid", chainOk, detail);
+
+    // De keten moet spreiding laten zien en bij de lokale speler uitkomen.
+    bool spread = !chains.empty() && chains[0].distinctPlayers == NUM_PLAYERS &&
+                  chains[0].localSeen;
+    snprintf(detail, sizeof(detail), "%u spelers, lokale speler %s",
+             chains.empty() ? 0 : chains[0].distinctPlayers,
+             (!chains.empty() && chains[0].localSeen) ? "bereikt" : "niet bereikt");
+    check("keten spreidt over alle spelers", spread, detail);
+
+    // De valstrik moet bestaan (anders test dit niets) en moet verliezen.
+    {
+        bool decoyPresent = false, decoyWon = false;
+        for (size_t i = 0; i < chains.size(); ++i) {
+            if (chains[i].objectToTeam != OBJECT_M_DECOY) continue;
+            decoyPresent = true;
+            if (i == 0) decoyWon = true;
+            break;
+        }
+        snprintf(detail, sizeof(detail), "%s",
+                 decoyPresent ? "valstrik aanwezig" : "valstrik NIET aanwezig");
+        check("degenererende keten verliest", decoyPresent && !decoyWon, detail);
+    }
 
     printf("\n%s\n", g_failed ? "ZELFTEST MISLUKT" : "ZELFTEST GESLAAGD");
     return g_failed;

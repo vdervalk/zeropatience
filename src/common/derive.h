@@ -131,15 +131,24 @@ std::vector<HealthVtable> findHealthVtables(const Target& t,
 // Object -> m_team -> Team -> m_proto -> TeamPrototype -> m_owningPlayer,
 // uitkomend op een pointer die al in ThePlayerList staat. Drie onbekende
 // offsets, maar het eindpunt is bekend, dus de keten valideert zichzelf.
+// Een keten die altijd dezelfde speler oplevert haalt evenveel
+// bevestigingen als de juiste, want ook die ene pointer staat in
+// ThePlayerList. Wat de juiste keten onderscheidt is spreiding: in een
+// potje horen objecten bij verschillende spelers. distinctPlayers is
+// daarom belangrijker dan confirmations, en localSeen bevestigt dat de
+// keten ook bij de lokale speler uitkomt.
 struct OwnerChain {
     uint32_t objectToTeam = 0;
     uint32_t teamToProto = 0;
     uint32_t protoToPlayer = 0;
     uint32_t confirmations = 0;
+    uint32_t distinctPlayers = 0;
+    bool     localSeen = false;
 };
 std::vector<OwnerChain> findOwnerChains(const Target& t,
                                         const std::vector<uint64_t>& objectInstances,
                                         const std::vector<uint64_t>& knownPlayers,
+                                        uint64_t localPlayer,
                                         uint32_t maxObjectOffset,
                                         uint32_t maxTeamOffset,
                                         uint32_t maxProtoOffset);

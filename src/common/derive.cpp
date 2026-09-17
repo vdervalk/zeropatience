@@ -247,11 +247,18 @@ std::vector<LinkPair> findDoubleLinks(const Target& t,
 std::vector<OwnerChain> findOwnerChains(const Target& t,
                                         const std::vector<uint64_t>& objectInstances,
                                         const std::vector<uint64_t>& knownPlayers,
+                                        uint64_t localPlayer,
                                         uint32_t maxObjectOffset,
                                         uint32_t maxTeamOffset,
                                         uint32_t maxProtoOffset) {
     std::unordered_set<uint64_t> playerSet(knownPlayers.begin(), knownPlayers.end());
-    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, uint32_t> tally;
+
+    struct Acc {
+        uint32_t hits = 0;
+        std::set<uint64_t> players;
+        bool local = false;
+    };
+    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, Acc> tally;
     const size_t ps = t.ptrSize();
 
     for (uint64_t obj : objectInstances) {
@@ -269,7 +276,11 @@ std::vector<OwnerChain> findOwnerChains(const Target& t,
                     uint64_t player = 0;
                     if (!t.rptr(proto + o3, player) || !player) continue;
                     if (!playerSet.count(player)) continue;
-                    tally[{o1, o2, o3}]++;
+
+                    Acc& a = tally[{o1, o2, o3}];
+                    a.hits++;
+                    a.players.insert(player);
+                    if (localPlayer && player == localPlayer) a.local = true;
                 }
             }
         }
@@ -281,21 +292,26 @@ std::vector<OwnerChain> findOwnerChains(const Target& t,
         c.objectToTeam  = std::get<0>(kv.first);
         c.teamToProto   = std::get<1>(kv.first);
         c.protoToPlayer = std::get<2>(kv.first);
-        c.confirmations = kv.second;
+        c.confirmations = kv.second.hits;
+        c.distinctPlayers = (uint32_t)kv.second.players.size();
+        c.localSeen = kv.second.local;
         out.push_back(c);
     }
+
+    // Spreiding weegt zwaarder dan het aantal treffers, en uitkomen bij de
+    // lokale speler weegt het zwaarst. Zonder die rangorde zijn een juiste
+    // keten en een keten die altijd de neutrale speler geeft niet te
+    // onderscheiden: beide halen het maximale aantal bevestigingen.
     std::sort(out.begin(), out.end(), [](const OwnerChain& a, const OwnerChain& b) {
+        if (a.localSeen != b.localSeen) return a.localSeen;
+        if (a.distinctPlayers != b.distinctPlayers)
+            return a.distinctPlayers > b.distinctPlayers;
         return a.confirmations > b.confirmations;
     });
     if (out.size() > 32) out.resize(32);
     return out;
 }
 
-// De zwakste infanterie in Generals heeft enkele tientallen hitpoints. Een
-// veld met een max van 0,3 is geen health maar een schaalfactor of een
-// genormaliseerde waarde. Zonder deze ondergrens verzuipt de lijst in zulke
-// velden: in een echte meting werd vrijwel elke kandidaat afgewezen op een
-// mediaan onder 0,5, terwijl de echte body-module er niet eens tussen stond.
 static bool plausibleCurrent(float v) {
     return std::isfinite(v) && v > 0.0f && v < 200000.0f;
 }

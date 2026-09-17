@@ -667,14 +667,18 @@ int main(int argc, char** argv) {
 
         // ActiveBody erft van vier polymorfe bases, dus het object hoort
         // precies vier vptrs te hebben. Dat is een onafhankelijke controle.
+        // In het volledige histogram opzoeken, niet in de top-40: de
+        // body-module staat daar juist vaak niet in.
         uint64_t bodyCount = 0;
-        for (const VtableCount& v : hist)
-            if (v.vtable == resolvedBodyVtable) bodyCount = v.count;
+        {
+            auto it = counts.find(resolvedBodyVtable);
+            if (it != counts.end()) bodyCount = it->second;
+        }
         // Object niet meetellen: klassen met toevallig hetzelfde aantal
         // instanties zouden anders als vptrs van hetzelfde object gelden.
         size_t siblings = 0;
-        for (const VtableCount& v : hist)
-            if (v.count == bodyCount && v.vtable != resolvedObjectVtable) siblings++;
+        for (auto& kv : counts)
+            if (kv.second == bodyCount && kv.first != resolvedObjectVtable) siblings++;
         say("vptr-groep        : %zu vtables met %llu instanties\n",
             siblings, (unsigned long long)bodyCount);
         say("                    ActiveBody erft van vier polymorfe bases en heeft\n"
@@ -746,18 +750,25 @@ int main(int argc, char** argv) {
         if (objects.empty()) {
             say("Geen instanties om te doorlopen.\n");
         } else {
+            uint64_t localPlayer = pls.empty() ? 0 : pls[0].localPlayer;
             std::vector<OwnerChain> chains =
-                findOwnerChains(t, objects, knownPlayers, 0x400, 0x80, 0x200);
+                findOwnerChains(t, objects, knownPlayers, localPlayer,
+                                0x400, 0x80, 0x200);
             if (chains.empty()) {
                 say("Geen keten gevonden die uitkomt op een bekende Player.\n");
             } else {
-                say("\n%-16s %-16s %-22s %s\n",
+                say("\nSPELERS is het aantal verschillende spelers dat de keten\n"
+                    "oplevert. Een keten die altijd dezelfde speler geeft haalt\n"
+                    "evenveel bevestigingen als de juiste, dus spreiding weegt\n"
+                    "zwaarder, en uitkomen bij jou het zwaarst.\n\n");
+                say("%-14s %-14s %-20s %-11s %-9s %s\n",
                     "Object::m_team", "Team::m_proto", "Proto::m_owningPlayer",
-                    "BEVESTIGD");
+                    "BEVESTIGD", "SPELERS", "JIJ EROP");
                 for (const OwnerChain& c : chains)
-                    say("+0x%-13x +0x%-13x +0x%-19x %u\n",
+                    say("+0x%-11x +0x%-11x +0x%-17x %-11u %-9u %s\n",
                         c.objectToTeam, c.teamToProto, c.protoToPlayer,
-                        c.confirmations);
+                        c.confirmations, c.distinctPlayers,
+                        c.localSeen ? "ja" : "nee");
                 say("\nDe bovenste regel is de keten die de hook gaat gebruiken.\n");
             }
         }

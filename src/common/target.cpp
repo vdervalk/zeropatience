@@ -124,6 +124,18 @@ void Target::buildSnapshot(uint64_t maxTotalBytes, bool includeMappedFiles) {
 
     for (const Region* r : ordered) {
         if (snapTotal_ + r->size > maxTotalBytes) continue;
+
+        // Deze code draait ook binnen het spel, in een 32-bit proces met
+        // krappe adresruimte en zonder exceptions. Een mislukte allocatie
+        // zou daar terminate aanroepen, dus eerst goedkoop reserveren om te
+        // zien of de ruimte er is.
+        if (void* probe = VirtualAlloc(nullptr, (SIZE_T)r->size,
+                                       MEM_RESERVE, PAGE_NOACCESS)) {
+            VirtualFree(probe, 0, MEM_RELEASE);
+        } else {
+            continue;
+        }
+
         Snapshot s;
         s.base = r->base;
         s.region = r;

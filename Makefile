@@ -17,8 +17,12 @@ BUILD  := build
 COMMON := src/common/target.cpp src/common/rtti.cpp src/common/derive.cpp
 PROBE  := src/probe/main.cpp src/probe/selftest.cpp $(COMMON)
 
-.PHONY: all probe32 probe64 clean
-all: probe32 probe64
+# De game is 32-bit, dus de DLL en de injector moeten dat ook zijn. De probe
+# bouwen we als 64-bit, want die kan een 32-bit proces gewoon uitlezen.
+.PHONY: all probe32 probe64 trainer clean
+all: probe32 probe64 trainer
+
+trainer: $(BUILD)/zp-freeze.dll $(BUILD)/zp-inject.exe
 
 probe32: $(BUILD)/zp-probe32.exe
 probe64: $(BUILD)/zp-probe64.exe
@@ -28,6 +32,18 @@ $(BUILD)/zp-probe32.exe: $(PROBE) | $(BUILD)
 
 $(BUILD)/zp-probe64.exe: $(PROBE) | $(BUILD)
 	$(CXX64) $(CXXFLAGS) -o $@ $(PROBE) $(LDLIBS)
+
+FREEZE := src/freeze/dll.cpp src/freeze/resolve.cpp $(COMMON)
+INJECT := src/inject/main.cpp src/common/target.cpp
+
+# -static-libgcc en -static-libstdc++ zodat er geen runtime-DLL's naast
+# hoeven te staan; de DLL wordt in een vreemd proces geladen en kan niet op
+# zoekpaden vertrouwen.
+$(BUILD)/zp-freeze.dll: $(FREEZE) | $(BUILD)
+	$(CXX32) $(CXXFLAGS) -shared -o $@ $(FREEZE) $(LDLIBS) 		-Wl,--enable-stdcall-fixup
+
+$(BUILD)/zp-inject.exe: $(INJECT) | $(BUILD)
+	$(CXX32) $(CXXFLAGS) -o $@ $(INJECT) $(LDLIBS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

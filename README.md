@@ -6,8 +6,13 @@ Voor mensen die weinig tijd hebben om te spelen: je eigen units en gebouwen
 worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 
 > **Alleen voor skirmish en campagne.** In een online potje zou dit de match
-> van je tegenstanders slopen. De DLL weigert daarom te activeren zodra het
-> spel in een netwerkpotje zit.
+> van je tegenstanders slopen.
+>
+> Er zit **geen automatische controle** op netwerkpotjes in. Die zou een
+> adres vereisen dat in deze build niet betrouwbaar te vinden is, en een
+> controle die soms werkt is erger dan geen controle: dan vertrouw je erop.
+> Het is dus aan jou om dit uit te laten in multiplayer. F10 schakelt het uit
+> zonder het spel te herstarten.
 
 ---
 
@@ -21,12 +26,16 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 1 | Tweede meting, vier vervolgfouten hersteld | **klaar** |
 | 1 | Derde en vierde meting: sorteerfout en te smalle kandidatenlijst hersteld | **klaar** |
 | 1 | Klassen op naam aanwijzen via de memory-pool namen | **klaar, getest** |
-| 2 | `zp-freeze.dll`: de damage-hook | wacht op een proberapport |
-| 2 | `zp-inject.exe` + F10-toggle | wacht op fase 2 |
+| 2 | `zp-freeze.dll`: de damage-hook | **klaar** |
+| 2 | `zp-inject.exe` + F10-toggle | **klaar** |
+| 2 | Getest in de echte game | **nog niet** |
 
-**Wat er nu van jou nodig is:** de probe één keer draaien en het rapport
-terugsturen. Daarmee staan de offsets voor jouw exacte build vast en kan de
-DLL gebouwd worden. Zie [Stap voor stap](#stap-voor-stap).
+De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
+die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
+(deze build heeft geen ASLR), maar `ThePlayerList` staat elk potje elders.
+
+**Wat er nu van jou nodig is:** injecteren en kijken of het werkt. Zie
+[De trainer gebruiken](#de-trainer-gebruiken).
 
 ---
 
@@ -125,7 +134,74 @@ code-patches, geen injectie. Alleen lezen.
 
 ---
 
-## Stap voor stap
+## De trainer gebruiken
+
+### Bouwen
+
+```sh
+sudo apt-get install mingw-w64
+make trainer
+```
+
+Levert `build/zp-freeze.dll` en `build/zp-inject.exe`, beide 32-bit, want dat
+is het spel ook. Statisch gelinkt, dus er hoeft niets naast te staan.
+
+### Draaien
+
+1. Start het spel en **laad een skirmish** met een paar eigen units. In een
+   menu bestaan de structuren niet en kan de DLL niets bepalen.
+2. Zet `zp-inject.exe` en `zp-freeze.dll` in dezelfde map.
+3. Draai `zp-inject.exe` **als administrator**.
+
+Er verschijnt een venster `zeropatience`. Dat doet, in deze volgorde:
+
+| | |
+|---|---|
+| **Thunk controleren** | De aanroepconventie wordt eerst tegen een nep-vtable geprobeerd. Klopt de stack niet, dan wordt er niets gehookt. |
+| **Offsets bepalen** | Duurt een paar seconden. Zelfde afleiding als de probe. |
+| **Hook plaatsen** | Eén pointer in de vtable, omkeerbaar. |
+
+Daarna:
+
+```
+F10   onkwetsbaarheid aan of uit
+F11   status tonen (welke offsets, hoe hard het bewijs)
+F12   hook verwijderen
+```
+
+### Waarom de thunk zich eerst laat controleren
+
+`attemptDamage` is `__thiscall`: `this` in `ECX`, het argument op de stack,
+en de *callee* ruimt dat argument op. Zit daar een fout in de stack-discipline,
+dan crasht het spel bij de eerste kogel.
+
+Die code kan hier niet gedraaid worden, want dit is een Linux-bouwmachine
+zonder werkende 32-bit Windows-omgeving. De assembly is met de hand
+nagelopen in de disassembly, maar dat is geen uitvoering. Daarom controleert
+de DLL zichzelf op jouw machine: hij roept de thunk twee keer aan met een
+nep-origineel, één keer doorgevend en één keer blokkerend, en meet of de
+stack pointer in beide gevallen terechtkomt. Pas als dat klopt raakt hij de
+echte vtable aan.
+
+### Wat de hook wel en niet doet
+
+De hook keert terug voordat er iets met de schade gebeurt, precies zoals de
+engine zelf doet bij `m_indestructible`. Dat betekent dat ook healing en
+schade-achtige besturingssignalen niet doorkomen voor jouw objecten:
+
+- `DAMAGE_HEALING` is zinloos als je toch geen schade oploopt, dus dat is
+  geen verlies.
+- `DAMAGE_DEPLOY` gebruiken transporten om lading te lossen. Dat kan met
+  onkwetsbaarheid aan dus haperen bij een enkel eenheidstype.
+
+Dit gedrag is gekozen omdat het exact is wat de engine zelf doet, en omdat
+onderscheid maken op schadetype een offset in `DamageInfo` vereist die nog
+niet met zekerheid vaststaat. Raad liever niet in het schadepad. Loop je
+ertegenaan, zet dan even F10 uit.
+
+---
+
+## Stap voor stap: de probe
 
 ### 1. Bouwen
 
