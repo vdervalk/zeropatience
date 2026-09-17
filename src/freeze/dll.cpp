@@ -290,11 +290,15 @@ static DWORD WINAPI worker(LPVOID) {
     logf("[zp] thunk in orde: doorgeven en blokkeren laten de stack terecht.\n\n");
 
     logf("[zp] offsets bepalen...\n");
-    // Bewust bescheiden: dit is een 32-bit proces dat zelf al honderden MB
-    // gebruikt. Minder geheugen betekent minder instanties in de steekproef,
-    // en dat is hier prima: de afleiding heeft tientallen instanties nodig,
-    // geen duizenden.
-    g_r = resolveInProcess(192, logf);
+    // Ruim genomen. Een eerdere poging met 192 MB mislukte: het spel houdt
+    // honderden MB aan geheugen vast, dus met een krap budget valt precies de
+    // heap met de game-objecten buiten de snapshot. Er waren maar 68
+    // ActiveBody-instanties, en die stonden er niet meer in.
+    //
+    // Het kopieren gebeurt per regio en elke allocatie wordt eerst gereserveerd
+    // om te kijken of hij past. Lukt dat niet, dan slaan we die regio over in
+    // plaats van het geheugen op te maken.
+    g_r = resolveInProcess(1024, logf);
     if (!g_r.ok) {
         logf("\n[zp] MISLUKT: %s\n\n", g_r.error.c_str());
         logf("[zp] Meest waarschijnlijke oorzaak: geinjecteerd terwijl je in een\n");

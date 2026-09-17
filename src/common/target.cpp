@@ -119,7 +119,11 @@ void Target::buildSnapshot(uint64_t maxTotalBytes, bool includeMappedFiles) {
                          if (ia != ib) return ia;          // image wint
                          if (a->type != b->type)
                              return a->type == MEM_PRIVATE; // dan de heap
-                         return a->size < b->size;          // kleine regio's eerst
+                         // Grote regio's eerst. Dat is geen smaak maar nood:
+                         // game-objecten staan in de grote heaps. Met kleine
+                         // regio's eerst raakt een krap budget op aan losse
+                         // brokjes en missen we juist de heap die ertoe doet.
+                         return a->size > b->size;
                      });
 
     for (const Region* r : ordered) {

@@ -88,9 +88,17 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
     // De juiste kandidaat is die waarvan de instanties zowel hitpoints hebben
     // als een wederzijdse verwijzing naar hun Object. Beide eisen samen laten
     // geen ruimte voor een toevallige treffer.
+    // Per kandidaat vertellen waar het strandt. Zonder dat is een mislukking
+    // een doodlopend spoor, en deze code draait op een machine waar ik niet
+    // bij kan.
+    say("  %-10s %-10s %-10s %s\n", "VTABLE", "INSTANTIES", "HITPOINTS", "OBJECT-LINK");
     for (const NameAnchor::Candidate& c : anchors[0].candidates) {
         std::vector<uint64_t> insts = instancesOf(t, c.vtable, 256, true);
-        if (insts.size() < 8) continue;
+        if (insts.size() < 8) {
+            say("  0x%-8llx %-10zu %-10s %s\n", (unsigned long long)c.vtable,
+                insts.size(), "-", "te weinig instanties");
+            continue;
+        }
 
         std::vector<HealthBlock> hb = findHealthBlocks(t, insts, -0x40, 0x60);
         const HealthBlock* health = nullptr;
@@ -101,7 +109,11 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
             health = &b;
             break;
         }
-        if (!health) continue;
+        if (!health) {
+            say("  0x%-8llx %-10zu %-10s %s\n", (unsigned long long)c.vtable,
+                insts.size(), "nee", "-");
+            continue;
+        }
 
         // De dubbele link: this + d wijst naar een Object, en dat Object
         // wijst op een vaste offset terug naar deze 'this'.
@@ -124,13 +136,25 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
                 }
             }
         }
-        if (links.empty()) continue;
+        if (links.empty()) {
+            say("  0x%-8llx %-10zu +0x%-7x %s\n", (unsigned long long)c.vtable,
+                insts.size(), (unsigned)health->offset, "geen wederzijdse link");
+            continue;
+        }
 
         auto best = std::max_element(links.begin(), links.end(),
                                      [](const auto& a, const auto& b) {
                                          return a.second < b.second;
                                      });
-        if (best->second < 8) continue;
+        if (best->second < 8) {
+            say("  0x%-8llx %-10zu +0x%-7x link te zwak (%u bevestigingen)\n",
+                (unsigned long long)c.vtable, insts.size(),
+                (unsigned)health->offset, best->second);
+            continue;
+        }
+        say("  0x%-8llx %-10zu +0x%-7x %d bevestigingen  <-- gekozen\n",
+            (unsigned long long)c.vtable, insts.size(),
+            (unsigned)health->offset, (int)best->second);
 
         r.bodyVtable          = (uintptr_t)c.vtable;
         r.objectVtable        = (uintptr_t)linkVtable[best->first];
