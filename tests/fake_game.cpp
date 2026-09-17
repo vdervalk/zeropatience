@@ -4,10 +4,18 @@
 // zestien slots, Objects met een dubbele link naar hun body-module, en een
 // eigenaarsketen Object -> Team -> TeamPrototype -> Player.
 //
-// Belangrijk detail dat we hiermee testen: het BodyModuleInterface-subobject
-// zit achteraan in het body-object, terwijl m_object vooraan staat. Vanaf de
-// 'this' die de hook krijgt is m_object dus een NEGATIEVE offset. Dat is
-// precies het geval dat de eerste versie van de scanner miste.
+// Dit testdoel bevat bewust de drie valkuilen die een echte meting op
+// Generals blootlegde:
+//
+//  1. Het BodyModuleInterface-subobject zit achteraan, dus m_object staat op
+//     een NEGATIEVE offset vanaf de 'this' die de hook krijgt, en de
+//     hitpoints op een positieve.
+//  2. Objects hangen in een dubbelgelinkte lijst (m_next / m_prev). Zo'n
+//     lijst geeft perfecte wederzijdse verwijzingen en verdrong in de echte
+//     meting de Object <-> BodyModule-relatie volledig uit de resultaten.
+//  3. Alle zestien m_players-slots zijn gevuld, ook de ongebruikte. De
+//     scanner eiste eerder dat de achterste NULL waren en vond daardoor in
+//     een echt potje nooit een PlayerList.
 
 #include <windows.h>
 #include <cstdio>
@@ -16,14 +24,19 @@
 #include <vector>
 
 // --- verwachte offsets, ook de uitkomst waar de test op controleert --------
+// De volgorde volgt de MSVC-indeling: eerst de data van de primaire basis
+// (met m_object), dan de vptr van het tweede basis-subobject, en daarachter
+// de eigen velden van de afgeleide klasse (met de hitpoints).
 enum : int {
-    BODY_SIZE        = 0x180,
-    BODY_IFACE_VPTR  = 0x00C0,   // 'this' voor attemptDamage
-    BODY_M_OBJECT    = 0x0010,   // dus -0xB0 vanaf 'this'
-    BODY_HEALTH      = 0x0060,   // dus -0x60 vanaf 'this'
+    BODY_SIZE        = 0x200,
+    BODY_M_OBJECT    = 0x0010,   // dus -0x70 vanaf 'this'
+    BODY_IFACE_VPTR  = 0x0080,   // 'this' voor attemptDamage
+    BODY_HEALTH      = 0x00B0,   // dus +0x30 vanaf 'this'
 
     OBJECT_SIZE      = 0x300,
     OBJECT_M_BODY    = 0x0040,
+    OBJECT_M_NEXT    = 0x0060,   // valkuil: dubbelgelinkte lijst
+    OBJECT_M_PREV    = 0x0068,
     OBJECT_M_TEAM    = 0x0150,
 
     TEAM_SIZE        = 0x80,
@@ -76,10 +89,19 @@ int main() {
         int      m_playerCount;
         void*    m_players[16];
     };
+    // Alle zestien slots worden gealloceerd, net als in de echte engine;
+    // m_playerCount zegt alleen hoeveel er meedoen.
+    std::vector<void*> allSlots;
+    for (int i = 0; i < 16; ++i) {
+        if (i < NUM_PLAYERS) { allSlots.push_back(players[i]); continue; }
+        void* p = calloc(1, PLAYER_SIZE);
+        put(p, 0, g_vtPlayer);
+        allSlots.push_back(p);
+    }
     FakePlayerList* pl = (FakePlayerList*)calloc(1, sizeof(FakePlayerList));
     pl->m_local = players[LOCAL_PLAYER];
     pl->m_playerCount = NUM_PLAYERS;
-    for (int i = 0; i < NUM_PLAYERS; ++i) pl->m_players[i] = players[i];
+    for (int i = 0; i < 16; ++i) pl->m_players[i] = allSlots[i];
 
     // --- teams en prototypes --------------------------------------------
     std::vector<void*> teams, protos;
@@ -96,9 +118,11 @@ int main() {
     }
 
     // --- objecten met body-modules ---------------------------------------
+    std::vector<void*> objects;
     for (int i = 0; i < NUM_OBJECTS; ++i) {
         void* obj  = calloc(1, OBJECT_SIZE);
         void* body = calloc(1, BODY_SIZE);
+        objects.push_back(obj);
 
         put(obj, 0, g_vtObject);
         put(body, 0, g_vtBodyPrimary);
@@ -117,9 +141,19 @@ int main() {
         putf(body, BODY_HEALTH + 12, mx);                               // initial
     }
 
+    // Valkuil 2: de objecten in een dubbelgelinkte ring hangen, precies zoals
+    // Object::m_next en Object::m_prev dat in de echte engine doen.
+    for (int i = 0; i < NUM_OBJECTS; ++i) {
+        void* cur  = objects[i];
+        void* next = objects[(i + 1) % NUM_OBJECTS];
+        void* prev = objects[(i + NUM_OBJECTS - 1) % NUM_OBJECTS];
+        put(cur, OBJECT_M_NEXT, next);
+        put(cur, OBJECT_M_PREV, prev);
+    }
+
     printf("PID=%lu\n", (unsigned long)GetCurrentProcessId());
     printf("VERWACHT this->m_object  = -0x%x\n", BODY_IFACE_VPTR - BODY_M_OBJECT);
-    printf("VERWACHT this->health    = -0x%x\n", BODY_IFACE_VPTR - BODY_HEALTH);
+    printf("VERWACHT this->health    = +0x%x\n", BODY_HEALTH - BODY_IFACE_VPTR);
     printf("VERWACHT Object::m_body  = +0x%x\n", OBJECT_M_BODY);
     printf("VERWACHT Object::m_team  = +0x%x\n", OBJECT_M_TEAM);
     printf("VERWACHT Team::m_proto   = +0x%x\n", TEAM_M_PROTO);

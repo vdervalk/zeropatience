@@ -366,7 +366,7 @@ int main(int argc, char** argv) {
 
     // ------------------------------------------------------------ histogram --
     rule("VTABLE-HISTOGRAM (werkt zonder RTTI)");
-    std::vector<VtableCount> hist = vtableHistogram(t, 30);
+    std::vector<VtableCount> hist = vtableHistogram(t, 40);
     say("%-14s %-16s %s\n", "VTABLE", "RVA", "INSTANTIES");
     for (const VtableCount& v : hist) {
         std::string tag;
@@ -381,27 +381,53 @@ int main(int argc, char** argv) {
             rva(t, v.vtable).c_str(), (unsigned long long)v.count, tag.c_str());
     }
 
+    // ------------------------------------------- body-module aan zijn inhoud --
+    //
+    // Niet op naam en niet op structuur, maar op inhoud: alleen een
+    // body-module heeft vier opeenvolgende floats die zich als hitpoints
+    // gedragen, en vrijwel elke instantie heeft ze op dezelfde offset. Die
+    // consistentie is het sterkste signaal dat er zonder RTTI te krijgen is.
+    rule("BODY-MODULE HERKENNEN AAN HITPOINTS");
+    std::vector<uint64_t> cand;
+    for (const VtableCount& v : hist) cand.push_back(v.vtable);
+    if (activeBodyIface) cand.push_back(activeBodyIface);
+    if (objectVtable)    cand.push_back(objectVtable);
+    std::sort(cand.begin(), cand.end());
+    cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+
+    std::vector<HealthVtable> hv = findHealthVtables(t, cand, 256, -0x40, 0x300);
+    if (hv.empty()) {
+        say("Geen enkele vtable heeft instanties met een consistent\n"
+            "hitpoint-patroon. Zat je wel in een geladen potje?\n");
+    } else {
+        say("%-14s %-16s %-10s %-12s %s\n",
+            "VTABLE", "RVA", "OFFSET", "BEVESTIGD", "AANDEEL");
+        for (const HealthVtable& h : hv)
+            say("0x%-12llx %-16s %-10s %u/%-10u %.0f%%\n",
+                (unsigned long long)h.vtable, rva(t, h.vtable).c_str(),
+                soff(h.offset).c_str(), h.confirmations, h.sampled,
+                h.ratio * 100.0);
+        say("\nEen aandeel dicht bij 100%% betekent dat vrijwel elke instantie\n"
+            "hitpoints heeft op dezelfde plek. Dat is de body-module.\n");
+    }
+
     // ---------------------------------------------------------- dubbele link --
     rule("DUBBELE LINKS (Object <-> BodyModule)");
     std::vector<LinkPair> links;
     {
-        std::vector<uint64_t> cand;
-        for (const VtableCount& v : hist) cand.push_back(v.vtable);
-        if (activeBodyIface) cand.push_back(activeBodyIface);
-        if (objectVtable)    cand.push_back(objectVtable);
-        std::sort(cand.begin(), cand.end());
-        cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
-
         say("Zoeken in %zu vtables, 24 instanties per vtable.\n"
-            "Offsets zijn signed en gelden vanaf het adres waar de vptr staat.\n\n",
+            "Offsets zijn signed en gelden vanaf het adres waar de vptr staat.\n\n"
+            "A en B moeten van verschillende klassen zijn. Object heeft namelijk\n"
+            "m_next en m_prev, en zo'n dubbelgelinkte lijst levert perfecte\n"
+            "wederzijdse verwijzingen op die de echte relatie wegdrukken.\n\n",
             cand.size());
-        links = findDoubleLinks(t, cand, 24, 0x400, 0x200);
+        links = findDoubleLinks(t, cand, 24, 0x400, 0x200, /*requireDistinct=*/true);
         if (links.empty()) {
-            say("Geen wederzijdse verwijzingen gevonden.\n");
+            say("Geen wederzijdse verwijzingen tussen verschillende klassen gevonden.\n");
         } else {
             say("%-14s %-10s %-14s %-10s %s\n",
                 "A (vtable)", "A->B", "B (vtable)", "B->A", "BEVESTIGD");
-            for (size_t i = 0; i < links.size() && i < 40; ++i) {
+            for (size_t i = 0; i < links.size() && i < 30; ++i) {
                 const LinkPair& p = links[i];
                 say("0x%-12llx %-10s 0x%-12llx %-10s %u\n",
                     (unsigned long long)p.vtableA, soff(p.offsetAtoB).c_str(),
@@ -413,96 +439,72 @@ int main(int argc, char** argv) {
 
     // ------------------------------------------------------------- resolutie --
     //
-    // Welke van de twee kanten van een dubbele link is de body-module en welke
-    // het Object? Dat beslissen we niet op naam maar op inhoud: alleen de
-    // body-module bevat vier opeenvolgende floats die zich als hitpoints
-    // gedragen. Daardoor werkt dit ook op een build zonder RTTI.
+    // ActiveBody heeft meerdere vptrs, want BodyModule erft van twee bases.
+    // Beide scoren even goed op hitpoints. De juiste is die waar Object's
+    // m_body precies naar wijst, want dat is de pointer waarop attemptDamage
+    // wordt aangeroepen en dus de 'this' die de detour krijgt.
     rule("RESOLUTIE");
 
     uint64_t resolvedBodyVtable   = 0;
     uint64_t resolvedObjectVtable = 0;
-    int32_t  resolvedThisToObject = 0;   // this -> Object      (vaak negatief)
+    int32_t  resolvedThisToObject = 0;   // this -> Object      (verwacht negatief)
     int32_t  resolvedObjectToBody = 0;   // Object::m_body
-    int32_t  resolvedHealthOffset = 0;   // this -> m_currentHealth
+    int32_t  resolvedHealthOffset = 0;   // this -> m_currentHealth (verwacht positief)
     uint32_t resolvedHealthConf   = 0;
-    const char* resolvedVia = "niets";
+    uint32_t resolvedLinkConf     = 0;
 
-    {
-        auto healthScore = [&](uint64_t vtable, int32_t* bestOff) -> uint32_t {
-            std::vector<uint64_t> insts = instancesOf(t, vtable, 64);
-            if (insts.empty()) return 0;
-            std::vector<HealthBlock> hb = findHealthBlocks(t, insts, -0x200, 0x200);
-            if (hb.empty()) return 0;
-            if (bestOff) *bestOff = hb[0].offset;
-            return hb[0].confirmations;
-        };
+    for (size_t i = 0; i < hv.size() && i < 6 && !resolvedBodyVtable; ++i) {
+        const HealthVtable& h = hv[i];
+        if (h.ratio < 0.5) break;        // te zwak om body-module te heten
 
-        for (size_t i = 0; i < links.size() && i < 24 && !resolvedBodyVtable; ++i) {
-            const LinkPair& p = links[i];
-            if (p.confirmations < 4) break;   // te weinig bewijs
+        const LinkPair* best = nullptr;
+        for (const LinkPair& p : links)
+            if (p.vtableA == h.vtable && (!best || p.confirmations > best->confirmations))
+                best = &p;
+        if (!best) continue;             // geen Object-link: waarschijnlijk de andere vptr
 
-            int32_t offA = 0, offB = 0;
-            uint32_t scoreA = healthScore(p.vtableA, &offA);
-            uint32_t scoreB = healthScore(p.vtableB, &offB);
-            if (scoreA == 0 && scoreB == 0) continue;
-
-            if (scoreA >= scoreB) {
-                // A is de body-module, B het Object.
-                resolvedBodyVtable   = p.vtableA;
-                resolvedObjectVtable = p.vtableB;
-                resolvedThisToObject = p.offsetAtoB;
-                resolvedObjectToBody = p.offsetBtoA;
-                resolvedHealthOffset = offA;
-                resolvedHealthConf   = scoreA;
-            } else {
-                resolvedBodyVtable   = p.vtableB;
-                resolvedObjectVtable = p.vtableA;
-                resolvedThisToObject = p.offsetBtoA;
-                resolvedObjectToBody = p.offsetAtoB;
-                resolvedHealthOffset = offB;
-                resolvedHealthConf   = scoreB;
-            }
-            resolvedVia = "dubbele link + hitpoint-patroon";
-        }
-
-        // Als RTTI beschikbaar was, is dat het sterkere bewijs. Bij verschil
-        // melden we dat expliciet in plaats van er stilzwijgend een te kiezen.
-        if (activeBodyIface) {
-            if (resolvedBodyVtable && resolvedBodyVtable != activeBodyIface) {
-                say("LET OP: RTTI wijst ActiveBody aan op 0x%llx, de heuristiek op\n"
-                    "0x%llx. RTTI wint, maar controleer dit handmatig.\n\n",
-                    (unsigned long long)activeBodyIface,
-                    (unsigned long long)resolvedBodyVtable);
-            }
-            resolvedBodyVtable = activeBodyIface;
-            resolvedVia = resolvedVia[0] == 'n' ? "RTTI" : "RTTI (bevestigd door heuristiek)";
-            if (objectVtable) resolvedObjectVtable = objectVtable;
-            int32_t off = 0;
-            uint32_t conf = healthScore(activeBodyIface, &off);
-            if (conf) { resolvedHealthOffset = off; resolvedHealthConf = conf; }
-        }
+        resolvedBodyVtable   = h.vtable;
+        resolvedObjectVtable = best->vtableB;
+        resolvedThisToObject = best->offsetAtoB;
+        resolvedObjectToBody = best->offsetBtoA;
+        resolvedHealthOffset = h.offset;
+        resolvedHealthConf   = h.confirmations;
+        resolvedLinkConf     = best->confirmations;
     }
 
     if (!resolvedBodyVtable) {
-        say("De body-module is niet vastgesteld.\n\n"
-            "Meest waarschijnlijke oorzaak: de probe draaide terwijl je in een\n"
-            "menu zat in plaats van in een geladen potje. Laad een skirmish,\n"
-            "bouw een paar units, en draai opnieuw.\n");
+        say("De body-module is niet vastgesteld.\n\n");
+        if (hv.empty())
+            say("Er is geen enkele vtable met een consistent hitpoint-patroon.\n"
+                "Meest waarschijnlijke oorzaak: de probe draaide in een menu in\n"
+                "plaats van in een geladen potje.\n");
+        else
+            say("Er zijn wel vtables met hitpoints (zie hierboven), maar geen\n"
+                "daarvan heeft een wederzijdse verwijzing naar een ander\n"
+                "klassetype. Stuur het rapport terug, dan kijk ik ernaar.\n");
     } else {
-        say("vastgesteld via   : %s\n\n", resolvedVia);
         say("ActiveBody-vtable : 0x%llx  (%s)\n",
             (unsigned long long)resolvedBodyVtable, rva(t, resolvedBodyVtable).c_str());
         say("Object-vtable     : 0x%llx  (%s)\n",
             (unsigned long long)resolvedObjectVtable, rva(t, resolvedObjectVtable).c_str());
+        say("bewijs            : %u hitpoint-bevestigingen, %u link-bevestigingen\n",
+            resolvedHealthConf, resolvedLinkConf);
         say("\nOffsets vanaf 'this', de pointer die de detour binnenkrijgt:\n");
         say("  this -> Object          %s\n", soff(resolvedThisToObject).c_str());
-        say("  this -> m_currentHealth %s   (%u bevestigingen)\n",
-            soff(resolvedHealthOffset).c_str(), resolvedHealthConf);
+        say("  this -> m_currentHealth %s\n", soff(resolvedHealthOffset).c_str());
         say("\nOffset vanaf het begin van Object:\n");
         say("  Object::m_body          %s\n", soff(resolvedObjectToBody).c_str());
-        if (resolvedThisToObject < 0)
-            say("\nDe negatieve offset naar Object is verwacht: het\n"
-                "BodyModuleInterface-subobject zit achteraan in ActiveBody.\n");
+
+        // De verwachte tekens volgen uit de MSVC-indeling: het tweede
+        // basis-subobject staat na de data van het eerste, en de eigen velden
+        // van de afgeleide klasse komen daar weer achter.
+        say("\nControle op de verwachte vorm:\n");
+        say("  this -> Object is negatief    %s\n",
+            resolvedThisToObject < 0 ? "ja, zoals verwacht"
+                                     : "NEE -- dit is verdacht");
+        say("  this -> hitpoints is positief %s\n",
+            resolvedHealthOffset > 0 ? "ja, zoals verwacht"
+                                     : "NEE -- dit is verdacht");
     }
 
     // ------------------------------------------------- ActiveBody-instanties --
@@ -512,12 +514,9 @@ int main(int argc, char** argv) {
 
         rule("GEZONDHEIDSVELDEN IN ACTIVEBODY");
         say("gevonden: %zu body-instanties\n\n", bodyInstances.size());
-        say("Gezocht naar vier opeenvolgende floats die zich gedragen als\n"
-            "m_currentHealth / m_prevHealth / m_maxHealth / m_initialHealth.\n"
-            "Offsets zijn relatief aan 'this'.\n\n");
-        std::vector<HealthBlock> hb = findHealthBlocks(t, bodyInstances, -0x200, 0x200);
+        std::vector<HealthBlock> hb = findHealthBlocks(t, bodyInstances, -0x40, 0x300);
         if (hb.empty()) {
-            say("Niets gevonden. Staan er wel units op de kaart?\n");
+            say("Niets gevonden.\n");
         } else {
             say("%-12s %-14s %-12s %s\n", "OFFSET", "BEVESTIGD", "current", "max");
             for (const HealthBlock& b : hb)
@@ -532,7 +531,7 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < bodyInstances.size() && i < 3; ++i) {
             say("\n-- instantie %zu: this = 0x%llx --\n", i,
                 (unsigned long long)bodyInstances[i]);
-            say("%s", hexDump(t, bodyInstances[i], -0x100, 0x80).c_str());
+            say("%s", hexDump(t, bodyInstances[i], -0x60, 0x180).c_str());
         }
     }
 

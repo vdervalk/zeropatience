@@ -4,8 +4,12 @@
 // De echte game is 32-bit. Op een Linux-bouwmachine is een 32-bit Windows-
 // proces niet altijd te draaien, dus bouwen we de adresruimte hier na in een
 // buffer: vier-byte pointers, een image met vtables, een heap met objecten,
-// en precies dezelfde structuurvorm als Generals. Daarmee ligt het pad dat de
-// gebruiker straks raakt onder test in plaats van onder aanname.
+// en precies dezelfde structuurvorm als Generals.
+//
+// De adresruimte bevat bewust de valkuilen die een echte meting op Generals
+// blootlegde: alle zestien spelerslots gevuld, een dubbelgelinkte objectlijst,
+// en een blok opvulling dat er bij een oppervlakkige controle als een vtable
+// uitziet.
 
 #include "../common/target.h"
 #include "../common/derive.h"
@@ -27,13 +31,17 @@ enum : uint32_t {
     HEAP_BASE    = 0x10000000,
     HEAP_SIZE    = 0x00100000,
 
-    BODY_SIZE       = 0x00C0,
-    BODY_IFACE_VPTR = 0x0060,    // 'this' voor attemptDamage
+    // MSVC-indeling: data van de primaire basis, dan de vptr van het tweede
+    // basis-subobject, dan de eigen velden van de afgeleide klasse.
+    BODY_SIZE       = 0x0100,
     BODY_M_OBJECT   = 0x0008,    // -0x58 vanaf 'this'
-    BODY_HEALTH     = 0x0030,    // -0x30 vanaf 'this'
+    BODY_IFACE_VPTR = 0x0060,    // 'this' voor attemptDamage
+    BODY_HEALTH     = 0x0090,    // +0x30 vanaf 'this'
 
     OBJECT_SIZE     = 0x0180,
     OBJECT_M_BODY   = 0x0020,
+    OBJECT_M_NEXT   = 0x0030,    // valkuil: dubbelgelinkte lijst
+    OBJECT_M_PREV   = 0x0034,
     OBJECT_M_TEAM   = 0x00A0,
 
     TEAM_SIZE       = 0x0040,
@@ -44,9 +52,15 @@ enum : uint32_t {
 
     PLAYER_SIZE     = 0x0100,
 
-    NUM_PLAYERS     = 5,
+    NUM_PLAYERS     = 5,         // in gebruik; er zijn er altijd 16 gealloceerd
     LOCAL_PLAYER    = 2,
     NUM_OBJECTS     = 32,
+
+    // Valkuil: een adres in het image met precies een uitvoerbaar slot,
+    // gevolgd door nullen. Een controle op alleen slot 0 accepteert dit als
+    // vtable; in een echte meting haalde 0x00555555 zo het histogram.
+    FAKE_VT_ADDR    = 0x00409000,
+    FAKE_VT_REFS    = 400,
 };
 
 struct Space {
@@ -102,20 +116,40 @@ int runSelfTest() {
     const uint32_t vtProto  = sp.makeVtable(VT_AREA + 0x400);
     const uint32_t vtPlayer = sp.makeVtable(VT_AREA + 0x500);
 
-    // Spelers.
-    std::vector<uint32_t> players;
-    for (uint32_t i = 0; i < NUM_PLAYERS; ++i) {
+    // Een blok in het image dat er met een controle op alleen slot 0 als een
+    // vtable uitziet, maar het niet is.
+    {
+        uint32_t fn = CODE_ADDR;
+        memcpy(sp.imgAt(FAKE_VT_ADDR), &fn, 4);          // slot 0 uitvoerbaar
+        memset(sp.imgAt(FAKE_VT_ADDR) + 4, 0, 28);       // de rest nul
+    }
+
+    // Spelers: alle zestien slots worden gealloceerd, precies zoals
+    // PlayerList::PlayerList dat doet. m_playerCount zegt alleen hoeveel er
+    // meedoen. Een scanner die eist dat de achterste slots NULL zijn, vindt
+    // in een echt potje dus nooit iets.
+    std::vector<uint32_t> allSlots;
+    for (uint32_t i = 0; i < 16; ++i) {
         uint32_t p = sp.alloc(PLAYER_SIZE);
         sp.put(p, vtPlayer);
-        players.push_back(p);
+        allSlots.push_back(p);
     }
+    std::vector<uint32_t> players(allSlots.begin(), allSlots.begin() + NUM_PLAYERS);
 
     // ThePlayerList: m_local, Int m_playerCount, Player* m_players[16].
     const uint32_t pl = sp.alloc(4 + 4 + 16 * 4);
     sp.put(pl, players[LOCAL_PLAYER]);
     sp.put(pl + 4, NUM_PLAYERS);
     for (uint32_t i = 0; i < 16; ++i)
-        sp.put(pl + 8 + i * 4, i < NUM_PLAYERS ? players[i] : 0);
+        sp.put(pl + 8 + i * 4, allSlots[i]);
+
+    // Veel verwijzingen naar het nep-vtable-adres, zodat het bij een te losse
+    // controle bovenaan het histogram zou belanden.
+    {
+        uint32_t block = sp.alloc(FAKE_VT_REFS * 4);
+        for (uint32_t i = 0; i < FAKE_VT_REFS; ++i)
+            sp.put(block + i * 4, FAKE_VT_ADDR);
+    }
 
     // Teams en prototypes.
     std::vector<uint32_t> teams;
@@ -131,8 +165,10 @@ int runSelfTest() {
     }
 
     // Objecten met hun body-module, dubbel gelinkt.
+    std::vector<uint32_t> objectAddrs;
     for (uint32_t i = 0; i < NUM_OBJECTS; ++i) {
         uint32_t obj  = sp.alloc(OBJECT_SIZE);
+        objectAddrs.push_back(obj);
         uint32_t body = sp.alloc(BODY_SIZE);
         uint32_t iface = body + BODY_IFACE_VPTR;
 
@@ -149,6 +185,14 @@ int runSelfTest() {
         sp.putf(body + BODY_HEALTH + 4,  mx);
         sp.putf(body + BODY_HEALTH + 8,  mx);
         sp.putf(body + BODY_HEALTH + 12, mx);
+    }
+
+    // Valkuil: de objecten in een dubbelgelinkte ring, zoals Object::m_next
+    // en Object::m_prev in de echte engine.
+    for (uint32_t i = 0; i < NUM_OBJECTS; ++i) {
+        sp.put(objectAddrs[i] + OBJECT_M_NEXT, objectAddrs[(i + 1) % NUM_OBJECTS]);
+        sp.put(objectAddrs[i] + OBJECT_M_PREV,
+               objectAddrs[(i + NUM_OBJECTS - 1) % NUM_OBJECTS]);
     }
 
     // --- de adresruimte aan Target aanbieden -----------------------------
@@ -186,22 +230,32 @@ int runSelfTest() {
         check("  juiste lokale speler", h.localIndex == LOCAL_PLAYER, detail);
         snprintf(detail, sizeof(detail), "+0x%x", h.arrayOffset);
         check("  array-offset zonder opvulling", h.arrayOffset == 8, detail);
+        check("  alle zestien slots gelezen", h.players.size() == 16);
     }
 
     // --- vtable-histogram ------------------------------------------------
-    std::vector<VtableCount> hist = vtableHistogram(t, 16);
-    bool sawBody = false, sawObj = false;
+    std::vector<VtableCount> hist = vtableHistogram(t, 24);
+    bool sawBody = false, sawObj = false, sawFake = false;
     for (const VtableCount& v : hist) {
-        if (v.vtable == vtBodyIf) sawBody = true;
-        if (v.vtable == vtObject) sawObj = true;
+        if (v.vtable == vtBodyIf)    sawBody = true;
+        if (v.vtable == vtObject)    sawObj = true;
+        if (v.vtable == FAKE_VT_ADDR) sawFake = true;
     }
     check("histogram vindt de Object-vtable", sawObj);
     check("histogram vindt de body-vtable", sawBody);
+    check("histogram verwerpt de opvulling", !sawFake,
+          sawFake ? "opvulling werd als vtable geteld" : "");
 
     // --- dubbele links ---------------------------------------------------
     std::vector<uint64_t> cand;
     for (const VtableCount& v : hist) cand.push_back(v.vtable);
-    std::vector<LinkPair> links = findDoubleLinks(t, cand, 24, 0x400, 0x200);
+    std::vector<LinkPair> links = findDoubleLinks(t, cand, 24, 0x400, 0x200, true);
+
+    // De dubbelgelinkte objectlijst mag nergens als Object <-> Body opduiken.
+    bool sawSelfLink = false;
+    for (const LinkPair& p : links)
+        if (p.vtableA == p.vtableB) sawSelfLink = true;
+    check("dubbelgelinkte lijst uitgesloten", !sawSelfLink);
 
     const int32_t expectThisToObject = -(int32_t)(BODY_IFACE_VPTR - BODY_M_OBJECT);
     bool foundLink = false;
@@ -223,12 +277,18 @@ int runSelfTest() {
     check("body-instanties gevonden", bodies.size() == NUM_OBJECTS, detail);
 
     std::vector<HealthBlock> hb = findHealthBlocks(t, bodies, -0x200, 0x200);
-    const int32_t expectHealth = -(int32_t)(BODY_IFACE_VPTR - BODY_HEALTH);
+    const int32_t expectHealth = (int32_t)BODY_HEALTH - (int32_t)BODY_IFACE_VPTR;
     bool healthOk = !hb.empty() && hb[0].offset == expectHealth;
-    snprintf(detail, sizeof(detail), "verwacht -0x%x, kreeg %s",
-             (unsigned)(BODY_IFACE_VPTR - BODY_HEALTH),
-             hb.empty() ? "niets" : (hb[0].offset < 0 ? "negatief" : "positief"));
+    snprintf(detail, sizeof(detail), "verwacht +0x%x", (unsigned)expectHealth);
     check("hitpoint-blok op de juiste offset", healthOk, detail);
+
+    // De body-module moet herkenbaar zijn aan zijn inhoud, los van structuur.
+    std::vector<HealthVtable> hv = findHealthVtables(t, cand, 256, -0x40, 0x300);
+    bool bodyOnTop = !hv.empty() && hv[0].vtable == vtBodyIf && hv[0].ratio > 0.9;
+    snprintf(detail, sizeof(detail), "%s, aandeel %.0f%%",
+             hv.empty() ? "niets" : (hv[0].vtable == vtBodyIf ? "juiste vtable" : "verkeerde vtable"),
+             hv.empty() ? 0.0 : hv[0].ratio * 100.0);
+    check("body-module herkend aan hitpoints", bodyOnTop, detail);
 
     // --- eigenaarsketen ---------------------------------------------------
     std::vector<uint64_t> objects = instancesOf(t, vtObject, 64);

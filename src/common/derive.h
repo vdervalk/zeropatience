@@ -15,11 +15,17 @@ namespace zp {
 // --- ThePlayerList ------------------------------------------------------
 //
 //   Player *m_local;
-//   Int     m_playerCount;        // 1..16
-//   Player *m_players[16];        // eerste m_playerCount gevuld, rest NULL
+//   Int     m_playerCount;        // 1..16, aantal IN GEBRUIK
+//   Player *m_players[16];        // ALTIJD alle zestien gevuld
 //
-// m_local moet gelijk zijn aan een van de gevulde slots. Dat maakt het
-// patroon zelf-valideerbaar: toeval dat hieraan voldoet is verwaarloosbaar.
+// De constructor alloceert alle zestien spelers en init() initialiseert ze
+// allemaal; m_playerCount zegt alleen hoeveel er meedoen aan dit potje. Een
+// eerdere versie eiste dat de ongebruikte slots NULL waren, en vond daardoor
+// in een echt potje nooit iets.
+//
+// Wat overblijft is nog steeds een sterk patroon: zestien verschillende
+// pointers die allemaal dezelfde vtable delen, voorafgegaan door een int van
+// 1 tot 16, met een m_local die gelijk is aan een van de eerste zoveel.
 struct PlayerListHit {
     uint64_t              addr = 0;        // adres van m_local
     uint32_t              arrayOffset = 0; // afstand van m_local tot m_players[0]
@@ -33,9 +39,14 @@ std::vector<PlayerListHit> findPlayerLists(const Target& t);
 
 // --- vtable-histogram ---------------------------------------------------
 //
-// Een vptr is een woord dat naar het image wijst en waarvan het eerste slot
-// naar uitvoerbare code wijst. De meest voorkomende zijn in een skirmish de
+// Een vptr is een woord dat naar het image wijst en waarvan de eerste slots
+// naar uitvoerbare code wijzen. De meest voorkomende zijn in een skirmish de
 // game-objecten. Werkt zonder RTTI.
+//
+// Het aantal gecontroleerde slots is bewust meer dan een: met slechts een
+// slot glipt er opvulling doorheen. In een echte meting dook 0x00555555 op
+// met 2244 "instanties", puur omdat een blok 0x55-opvulling toevallig naar
+// uitvoerbaar geheugen wees.
 struct VtableCount {
     uint64_t vtable = 0;
     uint64_t count = 0;
@@ -62,11 +73,37 @@ struct LinkPair {
     int32_t  offsetBtoA = 0;
     uint32_t confirmations = 0;   // aantal instanties dat dit bevestigt
 };
+//
+// requireDistinct sluit A en B van dezelfde klasse uit. Dat is geen detail:
+// Object heeft m_next en m_prev, en zo'n dubbelgelinkte lijst levert perfecte
+// wederzijdse verwijzingen op die de echte Object <-> BodyModule-relatie
+// wegdrukken. Object en de body-module zijn verschillende klassen, dus voor
+// die zoektocht mag A nooit gelijk zijn aan B.
 std::vector<LinkPair> findDoubleLinks(const Target& t,
                                       const std::vector<uint64_t>& vtables,
                                       size_t instancesPerVtable,
                                       int32_t reachA,
-                                      int32_t reachB);
+                                      int32_t reachB,
+                                      bool requireDistinct);
+
+// --- de body-module herkennen aan zijn inhoud ---------------------------
+//
+// Sterker dan welke structurele truc ook: alleen een body-module heeft vier
+// opeenvolgende floats die zich als hitpoints gedragen, en vrijwel elke
+// instantie heeft ze op dezelfde offset. We scoren kandidaat-vtables op die
+// consistentie in plaats van op naam of op positie in het histogram.
+struct HealthVtable {
+    uint64_t vtable = 0;
+    int32_t  offset = 0;
+    uint32_t confirmations = 0;
+    uint32_t sampled = 0;
+    double   ratio = 0.0;       // confirmations / sampled
+};
+std::vector<HealthVtable> findHealthVtables(const Target& t,
+                                            const std::vector<uint64_t>& candidates,
+                                            size_t samplesPerVtable,
+                                            int32_t fromOffset,
+                                            int32_t toOffset);
 
 // --- eigenaarsketen -----------------------------------------------------
 //

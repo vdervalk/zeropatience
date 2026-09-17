@@ -8,15 +8,27 @@
 
 namespace zp {
 
-// Wijst dit woord naar een object met een vtable in het image?
+// Is dit adres een geloofwaardige vtable? Vier opeenvolgende slots moeten
+// naar uitvoerbare code wijzen. Met slechts een slot glipt opvulling erdoor:
+// in een echte meting haalde 0x00555555 het histogram, puur omdat een blok
+// 0x55-bytes toevallig naar uitvoerbaar geheugen wees.
+static bool looksLikeVtable(const Target& t, uint64_t vt) {
+    if (!vt || !t.inImage(vt)) return false;
+    if (vt & (t.ptrSize() - 1)) return false;
+    for (int i = 0; i < 4; ++i) {
+        uint64_t fn = 0;
+        if (!t.rptr(vt + (uint64_t)i * t.ptrSize(), fn)) return false;
+        if (!fn || !t.isExecutable(fn)) return false;
+    }
+    return true;
+}
+
+// Wijst dit woord naar een object met een geloofwaardige vtable?
 static bool looksLikeInstance(const Target& t, uint64_t p, uint64_t* vtableOut) {
     if (!p || (p & (t.ptrSize() - 1)) != 0) return false;
     uint64_t vt = 0;
     if (!t.rptr(p, vt)) return false;
-    if (!vt || !t.inImage(vt)) return false;
-    uint64_t fn = 0;
-    if (!t.rptr(vt, fn)) return false;
-    if (!t.isExecutable(fn)) return false;
+    if (!looksLikeVtable(t, vt)) return false;
     if (vtableOut) *vtableOut = vt;
     return true;
 }
@@ -49,31 +61,26 @@ std::vector<PlayerListHit> findPlayerLists(const Target& t) {
                 uint64_t local = 0;
                 if (!t.rptr(a, local) || !local) continue;
 
+                // Alle zestien slots zijn altijd gealloceerd; m_playerCount
+                // zegt alleen hoeveel er meedoen. Eisen dat de achterste NULL
+                // zijn is fout en vindt in een echt potje nooit iets.
                 const uint64_t arr = a + ao;
                 std::vector<uint64_t> players(16, 0);
                 bool ok = true;
+                uint64_t vt0 = 0;
                 for (int k = 0; k < 16 && ok; ++k) {
                     if (!t.rptr(arr + (uint64_t)k * ps, players[k])) { ok = false; break; }
-                    if (k < (int)count) {
-                        if (!players[k]) ok = false;
-                    } else {
-                        if (players[k]) ok = false;   // achterste slots horen NULL te zijn
-                    }
-                }
-                if (!ok) continue;
-
-                // Alle gevulde spelers moeten dezelfde vtable delen.
-                uint64_t vt0 = 0;
-                if (!looksLikeInstance(t, players[0], &vt0)) continue;
-                for (uint32_t k = 1; k < count; ++k) {
                     uint64_t vt = 0;
-                    if (!looksLikeInstance(t, players[k], &vt) || vt != vt0) { ok = false; break; }
+                    if (!looksLikeInstance(t, players[k], &vt)) { ok = false; break; }
+                    if (k == 0) vt0 = vt;
+                    else if (vt != vt0) ok = false;   // allemaal dezelfde klasse
                 }
                 if (!ok) continue;
 
-                // Geen dubbele pointers, en m_local moet een van de spelers zijn.
-                std::set<uint64_t> uniq(players.begin(), players.begin() + count);
-                if (uniq.size() != count) continue;
+                // Zestien verschillende objecten, en m_local moet een van de
+                // spelers zijn die daadwerkelijk meedoen.
+                std::set<uint64_t> uniq(players.begin(), players.end());
+                if (uniq.size() != 16) continue;
                 int localIdx = -1;
                 for (uint32_t k = 0; k < count; ++k)
                     if (players[k] == local) { localIdx = (int)k; break; }
@@ -85,7 +92,7 @@ std::vector<PlayerListHit> findPlayerLists(const Target& t) {
                 h.playerCount = count;
                 h.localIndex = localIdx;
                 h.localPlayer = local;
-                h.players.assign(players.begin(), players.begin() + count);
+                h.players = players;
                 h.playerVtable = vt0;
                 out.push_back(h);
             }
@@ -111,8 +118,7 @@ std::vector<VtableCount> vtableHistogram(const Target& t, size_t topN) {
             if (!v || !t.inImage(v)) continue;
             if (bad.count(v)) continue;
             if (!good.count(v)) {
-                uint64_t fn = 0;
-                if (!t.rptr(v, fn) || !t.isExecutable(fn)) { bad.insert(v); continue; }
+                if (!looksLikeVtable(t, v)) { bad.insert(v); continue; }
                 good.insert(v);
             }
             counts[v]++;
@@ -153,7 +159,8 @@ std::vector<LinkPair> findDoubleLinks(const Target& t,
                                       const std::vector<uint64_t>& vtables,
                                       size_t instancesPerVtable,
                                       int32_t reachA,
-                                      int32_t reachB) {
+                                      int32_t reachB,
+                                      bool requireDistinct) {
     std::unordered_set<uint64_t> vtSet(vtables.begin(), vtables.end());
     std::map<std::tuple<uint64_t, int32_t, uint64_t, int32_t>, uint32_t> tally;
     const int32_t ps = (int32_t)t.ptrSize();
@@ -168,6 +175,10 @@ std::vector<LinkPair> findDoubleLinks(const Target& t,
                 uint64_t vtB = 0;
                 if (!t.rptr(B, vtB)) continue;
                 if (!vtSet.count(vtB)) continue;
+                // Object heeft m_next en m_prev. Zo'n dubbelgelinkte lijst
+                // geeft perfecte wederzijdse verwijzingen en verdringt de
+                // echte Object <-> BodyModule-relatie volledig.
+                if (requireDistinct && vtB == vtA) continue;
                 for (int32_t ob = -reachB; ob <= reachB; ob += ps) {
                     uint64_t back = 0;
                     if (!t.rptr((uint64_t)((int64_t)B + ob), back)) continue;
@@ -280,6 +291,38 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
         return a.confirmations > b.confirmations;
     });
     if (out.size() > 16) out.resize(16);
+    return out;
+}
+
+std::vector<HealthVtable> findHealthVtables(const Target& t,
+                                            const std::vector<uint64_t>& candidates,
+                                            size_t samplesPerVtable,
+                                            int32_t fromOffset,
+                                            int32_t toOffset) {
+    std::vector<HealthVtable> out;
+
+    for (uint64_t vt : candidates) {
+        std::vector<uint64_t> insts = instancesOf(t, vt, samplesPerVtable);
+        if (insts.size() < 8) continue;   // te weinig om iets over te zeggen
+
+        std::vector<HealthBlock> hb = findHealthBlocks(t, insts, fromOffset, toOffset);
+        if (hb.empty()) continue;
+
+        HealthVtable h;
+        h.vtable = vt;
+        h.offset = hb[0].offset;
+        h.confirmations = hb[0].confirmations;
+        h.sampled = (uint32_t)insts.size();
+        h.ratio = (double)h.confirmations / (double)h.sampled;
+        out.push_back(h);
+    }
+
+    // De body-module valt op doordat vrijwel elke instantie hitpoints heeft
+    // op dezelfde offset. Een toevallige treffer haalt die consistentie niet.
+    std::sort(out.begin(), out.end(), [](const HealthVtable& a, const HealthVtable& b) {
+        if (a.ratio != b.ratio) return a.ratio > b.ratio;
+        return a.confirmations > b.confirmations;
+    });
     return out;
 }
 

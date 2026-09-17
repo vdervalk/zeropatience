@@ -86,6 +86,17 @@ echo
 RESOLUTION="$WORK/resolution.txt"
 sed -n '/^  RESOLUTIE$/,/^  GEZONDHEIDSVELDEN/p' "$REPORT" > "$RESOLUTION"
 
+# De dubbelgelinkte objectlijst in het testdoel is de valkuil die de echte
+# meting liet mislukken: toen kwamen ActiveBody en Object op dezelfde vtable
+# uit. Die twee moeten nu verschillen.
+AB="$(sed -n 's/^ActiveBody-vtable : \(0x[0-9a-f]*\).*/\1/p' "$RESOLUTION")"
+OB="$(sed -n 's/^Object-vtable     : \(0x[0-9a-f]*\).*/\1/p' "$RESOLUTION")"
+if [[ -n "$AB" && -n "$OB" && "$AB" != "$OB" ]]; then
+    echo "VERSCHILLEND $AB $OB" > "$WORK/distinct.txt"
+else
+    echo "GELIJK $AB $OB" > "$WORK/distinct.txt"
+fi
+
 FAILED=0
 check() {  # check <omschrijving> <bestand> <grep-patroon>
     if grep -qE "$3" "$2"; then
@@ -101,10 +112,13 @@ echo "== controles =="
 check "ThePlayerList gevonden"              "$REPORT"     'm_local @ 0x'
 check "vier spelers geteld"                 "$REPORT"     'spelers=4'
 check "lokale speler is index 1"            "$REPORT"     'lokale index=1'
-check "body-module vastgesteld"             "$RESOLUTION" 'vastgesteld via   : dubbele link'
-check "this -> Object is -0xb0"             "$RESOLUTION" 'this -> Object +\-0xb0$'
-check "this -> health is -0x60"             "$RESOLUTION" 'this -> m_currentHealth \-0x60 '
+check "body-module vastgesteld"             "$RESOLUTION" 'ActiveBody-vtable : 0x'
+check "Object is niet dezelfde vtable"      "$WORK/distinct.txt" 'VERSCHILLEND'
+check "this -> Object is -0x70"             "$RESOLUTION" 'this -> Object +\-0x70$'
+check "this -> health is +0x30"             "$RESOLUTION" 'this -> m_currentHealth +\+0x30$'
 check "Object::m_body is +0x40"             "$RESOLUTION" 'Object::m_body +\+0x40$'
+check "vormcontrole: Object negatief"       "$RESOLUTION" 'Object is negatief +ja'
+check "vormcontrole: hitpoints positief"    "$RESOLUTION" 'hitpoints is positief +ja'
 check "eigenaarsketen m_team +0x150"        "$REPORT"     '^\+0x150 '
 check "eigenaarsketen volledig +0x150/+0x20/+0x48" "$REPORT" '^\+0x150 +\+0x20 +\+0x48 '
 

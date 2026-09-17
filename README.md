@@ -17,6 +17,7 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 |---|---|---|
 | 1 | Onderzoek naar het schadepad in de EA-broncode | **klaar** |
 | 1 | `zp-probe`: leest het draaiende spel uit en meet de offsets | **klaar, getest** |
+| 1 | Eerste meting op Generals, drie heuristiekfouten gevonden en hersteld | **klaar** |
 | 2 | `zp-freeze.dll`: de damage-hook | wacht op een proberapport |
 | 2 | `zp-inject.exe` + F10-toggle | wacht op fase 2 |
 
@@ -83,20 +84,29 @@ byte-offsets niet: die hangen af van compilerversie, structopvulling en
 buildvlaggen van jouw specifieke binary. Offsets gokken levert een trainer op
 die crasht of stilletjes niets doet.
 
-De probe meet ze daarom in plaats van ze aan te nemen, en accepteert nooit
-een offset omdat hij plausibel lijkt. Elke afleiding heeft een invariant die
-zichzelf bevestigt:
+De probe meet ze daarom in plaats van ze aan te nemen. De volgorde waarin
+hij dat doet is het resultaat van een mislukte eerste meting op een echte
+Generals-installatie, die liet zien dat structurele trucs kwetsbaar zijn voor
+toeval en inhoudelijke niet:
 
-- **ThePlayerList** — een pointer, dan een int van 1 tot 16, dan zestien
-  pointers waarvan de eerste zoveel gevuld zijn en de rest NULL, en `m_local`
-  moet gelijk zijn aan één van die pointers.
-- **Object ↔ body-module** — beide wijzen naar elkaar. Zo'n wederzijdse
-  verwijzing komt niet per ongeluk voor.
-- **Welke kant is de body?** — niet op naam, maar op inhoud: alleen de
-  body-module bevat vier opeenvolgende floats die zich als hitpoints gedragen
-  (`current <= max`, `max == initial`).
-- **De eigenaarsketen** — die moet uitkomen op een pointer die al in
-  ThePlayerList staat.
+1. **De body-module wordt herkend aan zijn inhoud.** Alleen een body-module
+   heeft vier opeenvolgende floats die zich als hitpoints gedragen
+   (`current <= max`, `max == initial`), en vrijwel elke instantie heeft ze op
+   dezelfde offset. Een aandeel richting 100% is nauwelijks toevallig te
+   halen.
+2. **Pas daarna wordt de structurele link naar `Object` gelegd**, geankerd op
+   iets dat al vaststaat. Daarbij moeten de vtables van beide kanten
+   verschillen, want `Object` heeft `m_next` en `m_prev` en zo'n
+   dubbelgelinkte lijst voldoet perfect aan "wijzen naar elkaar".
+3. **De eigenaarsketen** moet uitkomen op een pointer die al in ThePlayerList
+   staat.
+4. **ThePlayerList** zelf is zestien onderling verschillende pointers die
+   dezelfde vtable delen, voorafgegaan door een int van 1 tot 16, met een
+   `m_local` die gelijk is aan één van de eerste zoveel. Let op: alle zestien
+   slots zijn altijd gevuld, ook de ongebruikte.
+
+Wat er bij de eerste meting misging en waarom, staat uitgeschreven in
+[`docs/research.md`](docs/research.md).
 
 Daardoor werkt de probe ook als jouw build zonder RTTI is gecompileerd. RTTI
 wordt gebruikt als het er is, maar niets hangt ervan af.
@@ -205,9 +215,17 @@ Twee niveaus:
    de uitkomsten worden vergeleken met wat het testdoel daadwerkelijk heeft
    neergezet.
 
-Het testdoel bootst bewust het lastige geval na: het interface-subobject
-achteraan, `m_object` op een negatieve offset. Die situatie liet de eerste
-versie van de scanner falen en wordt nu afgevangen.
+Beide testdoelen bevatten bewust de valkuilen die een echte meting
+blootlegde, want een test die alleen de eigen aanname modelleert dekt de fout
+juist toe:
+
+- het interface-subobject achteraan, dus `m_object` op een **negatieve**
+  offset en de hitpoints op een positieve;
+- een **dubbelgelinkte objectlijst**, die perfecte wederzijdse verwijzingen
+  oplevert en de echte relatie verdrong;
+- **alle zestien spelerslots gevuld**, ook de ongebruikte;
+- een blok **opvulling dat zich voordoet als vtable**, met één uitvoerbaar
+  slot en verder nullen.
 
 Wat de tests **niet** dekken: de 32-bit MSVC RTTI-parser, want MinGW zendt
 Itanium-ABI RTTI uit en geen MSVC-RTTI. Dat pad is optioneel; als het faalt

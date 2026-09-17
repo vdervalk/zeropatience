@@ -152,3 +152,91 @@ DamageInfo
 
 De probe meet deze offsets na in plaats van ze aan te nemen: `m_damageType`
 moet een waarde 0..37 zijn en `m_amount` een plausibele float.
+
+---
+
+# Wat een echte meting op Generals leerde
+
+De eerste probe-run op de Steam-uitgave van het basisspel (`game.dat`,
+sha256 `88b03cfb…`, 32-bit, image base `0x400000`) leverde geen bruikbare
+offsets op. Drie oorzaken, alle drie fouten in de heuristiek en niet in de
+game. Ze staan hier omdat ze verklaren waarom de probe is zoals hij nu is.
+
+## 1. Alle zestien spelerslots zijn altijd gevuld
+
+De scanner eiste dat `m_players[k]` voor `k >= m_playerCount` NULL was. Dat
+is aantoonbaar fout:
+
+```cpp
+// Generals/Code/GameEngine/Source/Common/RTS/PlayerList.cpp
+PlayerList::PlayerList() : m_local(NULL), m_playerCount(0)
+{
+    for (Int i = 0; i < MAX_PLAYER_COUNT; i++)
+        m_players[ i ] = NEW Player( i );
+    init();
+}
+
+void PlayerList::init()
+{
+    m_playerCount = 1;
+    m_players[0]->init(NULL);
+    for (int i = 1; i < MAX_PLAYER_COUNT; i++)
+        m_players[i]->init(NULL);
+    setLocalPlayer(m_players[0]);
+}
+```
+
+Alle zestien `Player`-objecten worden in de constructor gealloceerd en door
+`init()` geinitialiseerd. `m_playerCount` zegt uitsluitend hoeveel spelers er
+aan dit potje meedoen. De eis dat de rest NULL is, kan in een draaiend spel
+dus nooit kloppen, en de scanner vond gegarandeerd niets.
+
+Het gecorrigeerde patroon is nog steeds sterk: zestien onderling
+verschillende pointers die allemaal dezelfde vtable delen, voorafgegaan door
+een int van 1 tot 16, met een `m_local` die gelijk is aan een van de eerste
+`m_playerCount` daarvan.
+
+## 2. Object hangt in een dubbelgelinkte lijst
+
+```cpp
+// Generals/Code/GameEngine/Include/GameLogic/Object.h
+Object *      m_next;
+Object *      m_prev;
+```
+
+De "dubbele link"-heuristiek zocht naar A en B die naar elkaar wijzen, in de
+veronderstelling dat dat de `Object` ↔ `BodyModule`-relatie zou opleveren.
+Maar een dubbelgelinkte lijst voldoet daar perfect aan: `A->m_next->m_prev`
+is per definitie `A`. In de meting kwamen de sterkste treffers dan ook op
+`+0xb4 / +0xb0` van dezelfde vtable naar zichzelf, met 24 van de 24
+bevestigingen, en het resultaat was de absurde conclusie dat `ActiveBody` en
+`Object` dezelfde vtable hadden.
+
+`Object` en de body-module zijn verschillende klassen, dus de zoektocht eist
+nu dat de vtables van A en B verschillen.
+
+## 3. Opvulling die zich voordoet als vtable
+
+Het histogram telde `0x00555555` als vtable met 2244 "instanties". Dat is een
+blok opvulbytes; het adres viel toevallig binnen het image en het woord erop
+wees toevallig naar uitvoerbaar geheugen. Een controle op alleen slot 0 is te
+zwak. Er worden nu vier opeenvolgende slots gecontroleerd.
+
+## Gevolg voor de opzet
+
+De structurele heuristiek bleek kwetsbaar voor toeval. De inhoudelijke niet.
+Daarom is de volgorde omgedraaid: de body-module wordt nu eerst herkend aan
+het feit dat vrijwel elk van zijn instanties vier opeenvolgende floats heeft
+die zich als hitpoints gedragen, op dezelfde offset. Pas daarna wordt de
+structurele link naar `Object` gelegd, geankerd op iets dat al vaststaat.
+
+## Bruikbare bijvangst
+
+- **Geen RTTI.** De retailbuild is zonder `/GR` gecompileerd, dus het
+  RTTI-pad levert niets op. De heuristiek moet het alleen kunnen.
+- **Geen ASLR.** De image base is `0x400000`, gelijk aan de voorkeursbasis in
+  de PE-header. De vtable-adressen zijn daarmee stabiel tussen sessies, en de
+  DLL kan met vaste RVA's werken in plaats van elke start opnieuw te zoeken.
+- **Dit is het basisspel.** Het pad was `Command and Conquer Generals`, dus de
+  `Generals/`-tree van de broncode, niet `GeneralsMD/`. Zero Hour is een
+  aparte binary met eigen offsets en heeft zijn eigen meting nodig.
