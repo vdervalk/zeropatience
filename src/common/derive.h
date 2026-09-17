@@ -165,6 +165,44 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
                                           int32_t fromOffset,
                                           int32_t toOffset);
 
+// --- klassen op naam aanwijzen -----------------------------------------
+//
+// De engine registreert elke pool onder een naam:
+//
+//   MEMORY_POOL_GLUE_WITH_USERLOOKUP_CREATE( Object,     "ObjectPool" )
+//   MEMORY_POOL_GLUE_WITH_USERLOOKUP_CREATE( ActiveBody, "ActiveBody" )
+//
+// Die namen staan als string in de binary, want createMemoryPool krijgt ze
+// als argument. Dat maakt ze tot het enige anker dat niet op statistiek
+// steunt: we zoeken de string, dan de code die ernaar verwijst, en vlak
+// daarbij de constructor die de vtables wegschrijft.
+//
+// Dit is nodig omdat een histogram-top nooit volstaat: de meest voorkomende
+// klassen zijn kleine, talrijke objecten, en de klasse die we zoeken valt
+// daar makkelijk buiten.
+struct NameAnchor {
+    struct Candidate {
+        uint64_t vtable = 0;
+        int32_t  distance = 0;     // afstand van de xref tot de vtable-verwijzing
+        uint32_t xrefsSeen = 0;    // hoeveel xrefs deze kandidaat in bereik hadden
+        uint64_t instances = 0;    // live instanties in het geheugen
+    };
+    std::string            name;
+    std::vector<uint64_t>  stringAddrs;
+    uint32_t               xrefCount = 0;
+    std::vector<Candidate> candidates;
+};
+
+std::vector<NameAnchor> findNameAnchors(const Target& t,
+                                        const std::vector<std::string>& names,
+                                        int32_t radius,
+                                        const std::map<uint64_t, uint64_t>& instanceCounts,
+                                        uint64_t minInstances);
+
+// Volledig vtable-histogram als map, zodat instantietellingen elders
+// opzoekbaar zijn zonder opnieuw te scannen.
+std::map<uint64_t, uint64_t> vtableCounts(const Target& t);
+
 // Hexdump rond een instantie, met labels relatief aan 'anchor'. Voor
 // handmatige inspectie van velden die de heuristiek niet dekt.
 std::string hexDump(const Target& t, uint64_t anchor, int32_t fromOff, int32_t toOff);

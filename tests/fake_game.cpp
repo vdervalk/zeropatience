@@ -71,6 +71,12 @@ static void fn0() {} static void fn1() {} static void fn2() {}
 static void fn3() {} static void fn4() {} static void fn5() {}
 
 typedef void (*Fn)();
+
+// Naamanker: de engine geeft poolnamen als string aan createMemoryPool, dus
+// "ActiveBody" staat in de binary met vlakbij een verwijzing naar de vtable.
+// Hier in een struct, zodat de twee gegarandeerd binnen bereik van elkaar
+// liggen in plaats van afhankelijk van de indeling die de linker kiest.
+static const char g_poolName[] = "ActiveBody";
 // Vtables als globals: die landen in het image, net als bij de echte game.
 static Fn g_vtObject[]      = {fn0, fn1, fn2, fn3, fn4, fn5};
 static Fn g_vtBodyPrimary[] = {fn1, fn2, fn3, fn0, fn4, fn5};
@@ -81,6 +87,13 @@ static Fn g_vtTeam[]        = {fn3, fn0, fn1, fn2, fn4, fn5};
 static Fn g_vtProto[]       = {fn4, fn5, fn0, fn1, fn2, fn3};
 static Fn g_vtPlayer[]      = {fn5, fn4, fn3, fn2, fn1, fn0};
 
+struct NameAnchorBlob {
+    const char* nameRef;
+    const void* filler[8];
+    const void* vtableRef;
+};
+extern const NameAnchorBlob g_nameAnchor;
+
 static void put(void* base, int off, const void* val) {
     memcpy((uint8_t*)base + off, &val, sizeof(void*));
 }
@@ -88,7 +101,13 @@ static void putf(void* base, int off, float v) {
     memcpy((uint8_t*)base + off, &v, sizeof(float));
 }
 
+const NameAnchorBlob g_nameAnchor = {g_poolName, {nullptr}, g_vtBodyIface};
+
 int main() {
+    // Aanraken zodat de linker het blok zeker meeneemt.
+    volatile const void* keep = g_nameAnchor.nameRef;
+    (void)keep;
+
     // --- spelers ---------------------------------------------------------
     std::vector<void*> players;
     for (int i = 0; i < NUM_PLAYERS; ++i) {

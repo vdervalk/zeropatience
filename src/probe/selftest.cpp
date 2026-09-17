@@ -16,6 +16,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <map>
 
 namespace zp {
 
@@ -83,6 +84,12 @@ enum : uint32_t {
     FAKE_VT_WRITABLE  = 0x00411000,
 
     FAKE_VT_REFS      = 400,
+
+    // Naamanker-regressie: een poolnaam in alleen-lezen data, een verwijzing
+    // ernaar in "code", en vlakbij een verwijzing naar de body-vtable. Zo
+    // moet findNameAnchors de klasse op naam kunnen aanwijzen.
+    NAME_STR_ADDR     = 0x00406000,
+    NAME_XREF_ADDR    = 0x00407000,
 };
 
 struct Space {
@@ -146,6 +153,17 @@ int runSelfTest() {
         uint32_t fn = CODE_ADDR;
         memcpy(sp.imgAt(FAKE_VT_UNALIGNED), &fn, 4);
         memcpy(sp.dataAt(FAKE_VT_WRITABLE), &fn, 4);
+    }
+
+    // De poolnaam neerleggen, met een verwijzing ernaar en de body-vtable
+    // vlak daarnaast. Bewust op oneven afstand, zoals een code-operand.
+    {
+        const char* nm = "ActiveBody";
+        memcpy(sp.imgAt(NAME_STR_ADDR), nm, strlen(nm) + 1);
+        uint32_t sref = NAME_STR_ADDR;
+        memcpy(sp.imgAt(NAME_XREF_ADDR), &sref, 4);
+        uint32_t vref = vtBodyIf;
+        memcpy(sp.imgAt(NAME_XREF_ADDR) + 0x23, &vref, 4);
     }
 
     // Spelers: alle zestien slots worden gealloceerd, precies zoals
@@ -340,6 +358,21 @@ int runSelfTest() {
              hv.empty() ? "niets" : (hv[0].vtable == vtBodyIf ? "juiste vtable" : "verkeerde vtable"),
              hv.empty() ? 0.0 : hv[0].ratio * 100.0);
     check("body-module herkend aan hitpoints", bodyOnTop, detail);
+
+    // --- klasse op naam aanwijzen -----------------------------------------
+    {
+        std::map<uint64_t, uint64_t> counts = vtableCounts(t);
+        std::vector<NameAnchor> anchors =
+            findNameAnchors(t, {"ActiveBody"}, 0x100, counts, /*minInstances=*/8);
+        bool ok = false;
+        for (const NameAnchor& a : anchors)
+            for (const NameAnchor::Candidate& c : a.candidates)
+                if (c.vtable == vtBodyIf) ok = true;
+        snprintf(detail, sizeof(detail), "%s",
+                 anchors.empty() || anchors[0].stringAddrs.empty()
+                     ? "poolnaam niet gevonden" : "poolnaam gevonden");
+        check("body-vtable via poolnaam aangewezen", ok, detail);
+    }
 
     // --- eigenaarsketen ---------------------------------------------------
     std::vector<uint64_t> objects = instancesOf(t, vtObject, 64);

@@ -119,6 +119,17 @@ check "this -> health is +0x30"             "$RESOLUTION" 'this -> m_currentHeal
 check "Object::m_body is +0x40"             "$RESOLUTION" 'Object::m_body +\+0x40$'
 check "vormcontrole: Object negatief"       "$RESOLUTION" 'Object is negatief +ja'
 check "vormcontrole: hitpoints positief"    "$RESOLUTION" 'hitpoints is positief +ja'
+check "poolnaam ActiveBody gevonden"        "$REPORT"     'string op: 0x'
+
+# De poolnaam moet dezelfde vtable aanwijzen als de resolutie koos. Dat is de
+# enige controle die niet op statistiek steunt.
+sed -n '/-- "ActiveBody" --/,/-- "ObjectPool" --/p' "$REPORT" > "$WORK/anchor.txt"
+if [[ -n "$AB" ]] && grep -q "$AB" "$WORK/anchor.txt"; then
+    echo "NAAM_KLOPT" > "$WORK/named.txt"
+else
+    echo "NAAM_WIJKT_AF $AB" > "$WORK/named.txt"
+fi
+check "poolnaam wijst dezelfde vtable aan"  "$WORK/named.txt" 'NAAM_KLOPT'
 check "eigenaarsketen m_team +0x150"        "$REPORT"     '^\+0x150 '
 check "eigenaarsketen volledig +0x150/+0x20/+0x48" "$REPORT" '^\+0x150 +\+0x20 +\+0x48 '
 

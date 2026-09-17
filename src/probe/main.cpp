@@ -368,7 +368,19 @@ int main(int argc, char** argv) {
 
     // ------------------------------------------------------------ histogram --
     rule("VTABLE-HISTOGRAM (werkt zonder RTTI)");
-    std::vector<VtableCount> hist = vtableHistogram(t, 40);
+    std::map<uint64_t, uint64_t> counts = vtableCounts(t);
+    std::vector<VtableCount> allVtables;
+    for (auto& kv : counts) allVtables.push_back({kv.first, kv.second});
+    std::sort(allVtables.begin(), allVtables.end(),
+              [](const VtableCount& a, const VtableCount& b) { return a.count > b.count; });
+
+    std::vector<VtableCount> hist(allVtables.begin(),
+                                  allVtables.begin() + std::min<size_t>(40, allVtables.size()));
+    say("%zu vtables met instanties in totaal; de veertig grootste hieronder.\n"
+        "De rest wordt niet weggegooid: de zoektocht hieronder gebruikt alles\n"
+        "met minstens 32 instanties. Een top-40 volstaat niet, want de meest\n"
+        "voorkomende klassen zijn kleine talrijke objecten en de klasse die we\n"
+        "zoeken valt daar makkelijk buiten.\n\n", allVtables.size());
     say("%-14s %-16s %s\n", "VTABLE", "RVA", "INSTANTIES");
     for (const VtableCount& v : hist) {
         std::string tag;
@@ -405,16 +417,69 @@ int main(int argc, char** argv) {
         if (!any) say("Geen groepen gevonden.\n");
     }
 
+    // ----------------------------------------------------- namen uit de engine --
+    //
+    // Het enige anker dat niet op statistiek steunt. De engine registreert
+    // elke pool onder een naam, en die naam gaat als string naar
+    // createMemoryPool:
+    //
+    //   MEMORY_POOL_GLUE_WITH_USERLOOKUP_CREATE( Object,     "ObjectPool" )
+    //   MEMORY_POOL_GLUE_WITH_USERLOOKUP_CREATE( ActiveBody, "ActiveBody" )
+    //
+    // We zoeken die strings, dan de code die ernaar verwijst, en vlak daarbij
+    // de constructor die de vtables wegschrijft.
+    rule("MODULENAAM-ANKERS");
+    static const std::vector<std::string> kNames = {
+        "ActiveBody", "ObjectPool", "StructureBody", "InactiveBody",
+        "HighlanderBody", "ImmortalBody", "UndeadBody",
+    };
+    std::vector<NameAnchor> anchors =
+        findNameAnchors(t, kNames, 0x1000, counts, /*minInstances=*/8);
+
+    std::set<uint64_t> namedActiveBody, namedObject;
+    for (const NameAnchor& a : anchors) {
+        say("\n-- \"%s\" --\n", a.name.c_str());
+        if (a.stringAddrs.empty()) {
+            say("   string niet in de binary gevonden\n");
+            continue;
+        }
+        say("   string op:");
+        for (uint64_t sa : a.stringAddrs) say(" 0x%llx", (unsigned long long)sa);
+        say("   (%u verwijzingen)\n", a.xrefCount);
+        if (a.candidates.empty()) {
+            say("   geen vtable-kandidaten met live instanties in de buurt\n");
+            continue;
+        }
+        say("   %-14s %-10s %-8s %s\n", "VTABLE", "AFSTAND", "XREFS", "INSTANTIES");
+        for (const NameAnchor::Candidate& c : a.candidates) {
+            say("   0x%-12llx %-10s %-8u %llu\n",
+                (unsigned long long)c.vtable, soff(c.distance).c_str(),
+                c.xrefsSeen, (unsigned long long)c.instances);
+            if (a.name == "ActiveBody") namedActiveBody.insert(c.vtable);
+            if (a.name == "ObjectPool") namedObject.insert(c.vtable);
+        }
+    }
+
     // ------------------------------------------- body-module aan zijn inhoud --
     rule("BODY-MODULE HERKENNEN AAN HITPOINTS");
+
+    // Alles met een noemenswaardig aantal instanties komt in aanmerking, niet
+    // alleen de kop van het histogram. De naamankers gaan er zeker in.
     std::vector<uint64_t> cand;
-    for (const VtableCount& v : hist) cand.push_back(v.vtable);
+    for (const VtableCount& v : allVtables) {
+        if (v.count < 32) break;
+        cand.push_back(v.vtable);
+        if (cand.size() >= 400) break;
+    }
+    for (uint64_t v : namedActiveBody) cand.push_back(v);
+    for (uint64_t v : namedObject)     cand.push_back(v);
     if (activeBodyIface) cand.push_back(activeBodyIface);
     if (objectVtable)    cand.push_back(objectVtable);
     std::sort(cand.begin(), cand.end());
     cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+    say("%zu kandidaat-vtables onderzocht.\n\n", cand.size());
 
-    std::vector<HealthVtable> hv = findHealthVtables(t, cand, 256, -0x40, 0x300);
+    std::vector<HealthVtable> hv = findHealthVtables(t, cand, 256, -0x80, 0x400);
     std::map<uint64_t, const HealthVtable*> healthByVtable;
     for (const HealthVtable& h : hv) healthByVtable[h.vtable] = &h;
 
@@ -426,7 +491,11 @@ int main(int argc, char** argv) {
             "dus VARIATIE (aantal verschillende max-waarden) telt zwaar mee.\n\n");
         say("%-14s %-9s %-11s %-9s %-9s %-11s %s\n",
             "VTABLE", "OFFSET", "BEVESTIGD", "VARIATIE", "MEDIAAN", "BESCHADIGD", "OORDEEL");
+        size_t shown = 0;
         for (const HealthVtable& h : hv) {
+            // Geslaagde kandidaten altijd, afgewezen alleen de eerste twintig:
+            // met honderden kandidaten wordt de tabel anders onleesbaar.
+            if (!h.passed && ++shown > 20) continue;
             char conf[32];
             snprintf(conf, sizeof(conf), "%u/%u", h.confirmations, h.sampled);
             char verdict[48];
@@ -485,6 +554,18 @@ int main(int argc, char** argv) {
               [&](uint64_t a, uint64_t b) { return listScore[a] > listScore[b]; });
     if (objectCandidates.size() > 4) objectCandidates.resize(4);
 
+    // Wat "ObjectPool" op naam aanwijst hoort er altijd bij, ook als de
+    // objectlijst het niet oppikte.
+    for (uint64_t v : namedObject) objectCandidates.push_back(v);
+    std::sort(objectCandidates.begin(), objectCandidates.end());
+    objectCandidates.erase(std::unique(objectCandidates.begin(),
+                                       objectCandidates.end()),
+                           objectCandidates.end());
+    if (!namedObject.empty())
+        say("\nOp naam aangewezen via \"ObjectPool\":");
+    for (uint64_t v : namedObject) say(" 0x%llx", (unsigned long long)v);
+    if (!namedObject.empty()) say("\n");
+
     // ------------------------------------------------- gericht zoeken vanaf Object --
     //
     // Object is groot, dus m_body kan honderden bytes ver liggen. Een breed
@@ -540,7 +621,8 @@ int main(int argc, char** argv) {
         for (const LinkPair& p : targeted) {
             auto it = healthByVtable.find(p.vtableB);
             const bool hasHealth = (it != healthByVtable.end() && it->second->passed);
-            if (pass == 0 && !hasHealth) continue;
+            const bool named = namedActiveBody.count(p.vtableB) > 0;
+            if (pass == 0 && !hasHealth && !named) continue;
             if (p.confirmations < 4) continue;
 
             resolvedObjectVtable = p.vtableA;
@@ -548,12 +630,18 @@ int main(int argc, char** argv) {
             resolvedObjectToBody = p.offsetAtoB;
             resolvedThisToObject = p.offsetBtoA;
             resolvedLinkConf     = p.confirmations;
-            if (hasHealth) {
+            if (hasHealth && named) {
+                resolvedHealthOffset = it->second->offset;
+                resolvedHealthConf   = it->second->confirmations;
+                resolvedNote = "modulenaam, objectlijst en hitpoints bevestigen elkaar";
+            } else if (named) {
+                resolvedNote = "modulenaam en objectlijst bevestigen elkaar";
+            } else if (hasHealth) {
                 resolvedHealthOffset = it->second->offset;
                 resolvedHealthConf   = it->second->confirmations;
                 resolvedNote = "objectlijst en hitpoints bevestigen elkaar";
             } else {
-                resolvedNote = "alleen op de objectlijst; hitpoints bevestigen niets";
+                resolvedNote = "alleen op de objectlijst; niets bevestigt dit";
             }
             break;
         }
@@ -623,7 +711,7 @@ int main(int argc, char** argv) {
 
         rule("GEZONDHEIDSVELDEN IN ACTIVEBODY");
         say("gevonden: %zu body-instanties\n\n", bodyInstances.size());
-        std::vector<HealthBlock> hb = findHealthBlocks(t, bodyInstances, -0x40, 0x300);
+        std::vector<HealthBlock> hb = findHealthBlocks(t, bodyInstances, -0x80, 0x400);
         if (hb.empty()) {
             say("Niets gevonden.\n");
         } else {

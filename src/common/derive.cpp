@@ -291,8 +291,16 @@ std::vector<OwnerChain> findOwnerChains(const Target& t,
     return out;
 }
 
-static bool plausibleHealth(float v) {
+// De zwakste infanterie in Generals heeft enkele tientallen hitpoints. Een
+// veld met een max van 0,3 is geen health maar een schaalfactor of een
+// genormaliseerde waarde. Zonder deze ondergrens verzuipt de lijst in zulke
+// velden: in een echte meting werd vrijwel elke kandidaat afgewezen op een
+// mediaan onder 0,5, terwijl de echte body-module er niet eens tussen stond.
+static bool plausibleCurrent(float v) {
     return std::isfinite(v) && v > 0.0f && v < 200000.0f;
+}
+static bool plausibleMax(float v) {
+    return std::isfinite(v) && v >= 10.0f && v < 200000.0f;
 }
 
 std::vector<HealthBlock> findHealthBlocks(const Target& t,
@@ -317,8 +325,8 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
             if (!t.rf32(a + 8,  mx))   continue;
             if (!t.rf32(a + 12, init)) continue;
 
-            if (!plausibleHealth(cur) || !plausibleHealth(mx) || !plausibleHealth(init))
-                continue;
+            if (!plausibleCurrent(cur)) continue;
+            if (!plausibleMax(mx) || !plausibleMax(init)) continue;
             if (!std::isfinite(prev) || prev < 0.0f) continue;
             if (cur > mx * 1.001f) continue;            // current mag max niet overstijgen
             if (std::fabs(mx - init) > 0.01f) continue; // max == initial in de regel
@@ -424,6 +432,137 @@ std::vector<HealthVtable> findHealthVtables(const Target& t,
         if (a.passed != b.passed) return a.passed;
         return a.score > b.score;
     });
+    return out;
+}
+
+std::map<uint64_t, uint64_t> vtableCounts(const Target& t) {
+    std::map<uint64_t, uint64_t> counts;
+    std::unordered_set<uint64_t> good, bad;
+    const size_t ps = t.ptrSize();
+
+    for (const Snapshot& s : t.snapshots()) {
+        if (!s.region || s.region->type != MEM_PRIVATE) continue;
+        if (!s.region->writable()) continue;
+        const uint8_t* d = s.bytes.data();
+        const size_t len = s.bytes.size();
+        for (size_t i = 0; i + ps <= len; i += ps) {
+            uint64_t v = 0;
+            if (ps == 4) { uint32_t x; memcpy(&x, d + i, 4); v = x; }
+            else         { memcpy(&v, d + i, 8); }
+            if (!v || !t.inImage(v)) continue;
+            if (bad.count(v)) continue;
+            if (!good.count(v)) {
+                if (!looksLikeVtable(t, v)) { bad.insert(v); continue; }
+                good.insert(v);
+            }
+            counts[v]++;
+        }
+    }
+    return counts;
+}
+
+// Zoekt een byte-reeks in de image-snapshots.
+static std::vector<uint64_t> imageFindBytes(const Target& t,
+                                            const void* needle, size_t n) {
+    std::vector<uint64_t> hits;
+    const uint8_t* pat = (const uint8_t*)needle;
+    for (const Snapshot& s : t.snapshots()) {
+        if (!t.inImage(s.base)) continue;
+        const uint8_t* d = s.bytes.data();
+        const size_t len = s.bytes.size();
+        if (len < n) continue;
+        for (size_t i = 0; i + n <= len; ++i)
+            if (d[i] == pat[0] && memcmp(d + i, pat, n) == 0)
+                hits.push_back(s.base + i);
+    }
+    return hits;
+}
+
+std::vector<NameAnchor> findNameAnchors(const Target& t,
+                                        const std::vector<std::string>& names,
+                                        int32_t radius,
+                                        const std::map<uint64_t, uint64_t>& instanceCounts,
+                                        uint64_t minInstances) {
+    std::vector<NameAnchor> out;
+
+    for (const std::string& name : names) {
+        NameAnchor a;
+        a.name = name;
+
+        // De string met afsluitende NUL, en het teken ervoor mag geen
+        // naamteken zijn. Zonder die tweede eis vindt "ActiveBody" ook de
+        // staart van "InactiveBody".
+        std::string needle = name + '\0';
+        for (uint64_t at : imageFindBytes(t, needle.c_str(), needle.size())) {
+            uint8_t before = 0;
+            if (t.r8(at - 1, before)) {
+                bool nameChar = (before >= 'A' && before <= 'Z') ||
+                                (before >= 'a' && before <= 'z') ||
+                                (before >= '0' && before <= '9') || before == '_';
+                if (nameChar) continue;
+            }
+            a.stringAddrs.push_back(at);
+            if (a.stringAddrs.size() >= 8) break;
+        }
+        if (a.stringAddrs.empty()) { out.push_back(a); continue; }
+
+        // Verwijzingen naar de string. Code-operanden zijn niet uitgelijnd,
+        // dus we zoeken per byte in plaats van per woord.
+        std::vector<uint64_t> xrefs;
+        for (uint64_t sa : a.stringAddrs) {
+            uint32_t le = (uint32_t)sa;
+            uint8_t pat[4] = {(uint8_t)(le), (uint8_t)(le >> 8),
+                              (uint8_t)(le >> 16), (uint8_t)(le >> 24)};
+            for (uint64_t x : imageFindBytes(t, pat, 4)) {
+                xrefs.push_back(x);
+                if (xrefs.size() >= 64) break;
+            }
+            if (xrefs.size() >= 64) break;
+        }
+        a.xrefCount = (uint32_t)xrefs.size();
+
+        // Rond elke xref zoeken naar woorden die een vtable kunnen zijn. De
+        // constructor die de vtables wegschrijft zit doorgaans dicht bij de
+        // code die de poolnaam doorgeeft.
+        std::map<uint64_t, std::pair<uint32_t, int32_t>> found;  // vtable -> (xrefs, dichtste)
+        for (uint64_t x : xrefs) {
+            std::set<uint64_t> seenHere;
+            for (int32_t d = -radius; d <= radius; ++d) {
+                // Woordgrootte van het doel, niet van de probe. Een 32-bit
+                // game bewaart vtable-pointers in vier bytes; leest de scan
+                // altijd vier bytes, dan vindt hij in een 64-bit doel niets.
+                uint64_t v = 0;
+                if (!t.rptr((uint64_t)((int64_t)x + d), v)) continue;
+                if (!v) continue;
+                if (!looksLikeVtable(t, v)) continue;
+                if (!seenHere.insert(v).second) continue;
+                auto& e = found[v];
+                e.first++;
+                if (e.first == 1 || std::abs(d) < std::abs(e.second)) e.second = d;
+            }
+        }
+
+        for (auto& kv : found) {
+            uint64_t inst = 0;
+            auto it = instanceCounts.find(kv.first);
+            if (it != instanceCounts.end()) inst = it->second;
+            if (inst < minInstances) continue;   // geen live klasse, dus ruis
+
+            NameAnchor::Candidate c;
+            c.vtable = kv.first;
+            c.xrefsSeen = kv.second.first;
+            c.distance = kv.second.second;
+            c.instances = inst;
+            a.candidates.push_back(c);
+        }
+        std::sort(a.candidates.begin(), a.candidates.end(),
+                  [](const NameAnchor::Candidate& x, const NameAnchor::Candidate& y) {
+                      if (x.xrefsSeen != y.xrefsSeen) return x.xrefsSeen > y.xrefsSeen;
+                      return std::abs(x.distance) < std::abs(y.distance);
+                  });
+        if (a.candidates.size() > 12) a.candidates.resize(12);
+        out.push_back(a);
+    }
     return out;
 }
 

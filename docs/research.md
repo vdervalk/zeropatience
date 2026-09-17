@@ -296,3 +296,82 @@ verschillende max-health. De score weegt nu mee hoeveel verschillende
 max-waarden er voorkomen, eist er minstens vier, en eist dat de mediaan
 minstens 10 is. Het aantal beschadigde instanties (`current < max`) staat er
 als extra aanwijzing bij.
+
+---
+
+# Wat de vierde meting leerde, en waarom de aanpak verandert
+
+De diagnosekolommen uit v3 deden hun werk: de vierde meting liet precies zien
+waar het strandde, in plaats van alleen dat het strandde.
+
+## 8. Een ondergrens die niets uitsluit, sluit niets uit
+
+Vrijwel elke kandidaat werd afgewezen met mediaan `0`. Dat cijfer is
+afgerond: die velden bevatten floats onder 0,5. Schaalfactoren,
+genormaliseerde waarden, interpolatiegewichten.
+
+Het ruwe filter liet alles door wat groter was dan nul, dus de lijst verzoop
+in zulke velden. De zwakste infanterie in Generals heeft enkele tientallen
+hitpoints, dus de ruwe eis is nu `max >= 10`. Daarmee valt het gros van die
+ruis weg voordat er iets gerangschikt wordt.
+
+## 9. Een histogram-top is geen kandidatenlijst
+
+Het belangrijkste dat de vierde meting liet zien, is wat er *niet* in stond:
+`ActiveBody` kwam in de hele tabel niet voor.
+
+De kandidaten kwamen uit de veertig meest voorkomende vtables. Die lijst
+wordt gedomineerd door kleine, talrijke objecten: de kop zat op 10.407 en
+9.609 instanties, en de veertigste plek lag nog op 1.477. Een klasse met
+ruim duizend instanties valt daar buiten en wordt dus nooit onderzocht.
+
+Het volledige histogram wordt nu opgebouwd, en alles met minstens 32
+instanties komt in aanmerking.
+
+## 10. De engine noemt zijn klassen bij naam
+
+Het diepere probleem is dat statistiek nooit uitsluitsel geeft. Er was al een
+anker dat dat wel doet, en dat was over het hoofd gezien: de engine
+registreert elke memory pool onder een naam, en die naam gaat als string naar
+`createMemoryPool`.
+
+```cpp
+// Generals/Code/GameEngine/Include/GameLogic/Object.h
+MEMORY_POOL_GLUE_WITH_USERLOOKUP_CREATE( Object, "ObjectPool" )
+
+// Generals/Code/GameEngine/Include/GameLogic/Module/ActiveBody.h
+MEMORY_POOL_GLUE_WITH_USERLOOKUP_CREATE( ActiveBody, "ActiveBody" )
+```
+
+Die strings staan dus met zekerheid in de binary. De probe zoekt ze op, zoekt
+de code die ernaar verwijst, en kijkt in de buurt naar woorden die een vtable
+kunnen zijn: de constructor die de vtables wegschrijft zit doorgaans dicht bij
+de code die de poolnaam doorgeeft.
+
+Twee details die het verschil maken:
+
+- Het teken voor de string mag geen naamteken zijn. Zonder die eis vindt
+  `"ActiveBody"` ook de staart van `"InactiveBody"`.
+- Een kandidaat moet live instanties in het geheugen hebben. Een toevallig
+  woord in code dat op een vtable lijkt, heeft die niet.
+
+Dit is de enige aanwijzing in het hele project die niet op statistiek steunt,
+en daarmee de sterkste. Hitpoints en de objectlijst blijven als onafhankelijke
+bevestiging.
+
+## 11. Ook ActiveBody heeft vier vptrs
+
+Uit de overervingsketen van de basisgame:
+
+```cpp
+class Module        : public MemoryPoolObject, public Snapshot   // 2 vptrs
+class ObjectModule  : public Module                              // 2
+class BehaviorModule: public ObjectModule, public BehaviorModuleInterface  // 3
+class BodyModule    : public BehaviorModule, public BodyModuleInterface    // 4
+class ActiveBody    : public BodyModule                          // 4
+```
+
+`attemptDamage` staat in de laatst toegevoegde, `BodyModuleInterface`. Uit de
+MSVC-indeling volgt dat de eigen velden van `ActiveBody`, inclusief de
+hitpoints, daar *achter* liggen, en dat `m_object` ervoor ligt. Vandaar de
+verwachting: `this -> Object` negatief, `this -> hitpoints` positief.

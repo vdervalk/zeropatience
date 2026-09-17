@@ -19,6 +19,8 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 1 | `zp-probe`: leest het draaiende spel uit en meet de offsets | **klaar, getest** |
 | 1 | Eerste meting op Generals, drie heuristiekfouten hersteld | **klaar** |
 | 1 | Tweede meting, vier vervolgfouten hersteld | **klaar** |
+| 1 | Derde en vierde meting: sorteerfout en te smalle kandidatenlijst hersteld | **klaar** |
+| 1 | Klassen op naam aanwijzen via de memory-pool namen | **klaar, getest** |
 | 2 | `zp-freeze.dll`: de damage-hook | wacht op een proberapport |
 | 2 | `zp-inject.exe` + F10-toggle | wacht op fase 2 |
 
@@ -90,18 +92,24 @@ hij dat doet is het resultaat van een mislukte eerste meting op een echte
 Generals-installatie, die liet zien dat structurele trucs kwetsbaar zijn voor
 toeval en inhoudelijke niet:
 
-1. **De body-module wordt herkend aan zijn inhoud.** Alleen een body-module
+1. **Klassen worden op naam aangewezen.** De engine registreert elke memory
+   pool onder een naam (`"ObjectPool"` voor `Object`, `"ActiveBody"` voor
+   `ActiveBody`), en die naam gaat als string naar `createMemoryPool`. De
+   probe zoekt die string, dan de code die ernaar verwijst, en vlakbij de
+   constructor die de vtables wegschrijft. Dit is de enige aanwijzing die
+   niet op statistiek steunt.
+2. **De body-module wordt herkend aan zijn inhoud.** Alleen een body-module
    heeft vier opeenvolgende floats die zich als hitpoints gedragen
    (`current <= max`, `max == initial`), en vrijwel elke instantie heeft ze op
    dezelfde offset. Een aandeel richting 100% is nauwelijks toevallig te
    halen.
-2. **Pas daarna wordt de structurele link naar `Object` gelegd**, geankerd op
+3. **Pas daarna wordt de structurele link naar `Object` gelegd**, geankerd op
    iets dat al vaststaat. Daarbij moeten de vtables van beide kanten
    verschillen, want `Object` heeft `m_next` en `m_prev` en zo'n
    dubbelgelinkte lijst voldoet perfect aan "wijzen naar elkaar".
-3. **De eigenaarsketen** moet uitkomen op een pointer die al in ThePlayerList
+4. **De eigenaarsketen** moet uitkomen op een pointer die al in ThePlayerList
    staat.
-4. **ThePlayerList** zelf is zestien onderling verschillende pointers die
+5. **ThePlayerList** zelf is zestien onderling verschillende pointers die
    dezelfde vtable delen, voorafgegaan door een int van 1 tot 16, met een
    `m_local` die gelijk is aan één van de eerste zoveel. Let op: alle zestien
    slots zijn altijd gevuld, ook de ongebruikte.
