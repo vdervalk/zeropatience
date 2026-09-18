@@ -61,27 +61,8 @@ struct Shared {
     // betekent: geen sneltoets, alleen schakelen via de GUI.
     uint32_t hotkeyVk;
 
-    // --- comfortinstellingen ---------------------------------------------
-    //
-    // De DLL zet qolAvailable en de oorspronkelijke waarden; de GUI zet wat
-    // hij wil hebben. Nul betekent "laat staan zoals het spel het had".
-    uint32_t qolAvailable;      // door de DLL gezet
-    uint32_t qolOrigCameraMax;  // idem, afgerond naar een geheel getal
-    uint32_t qolOrigFpsLimit;   // idem
-    uint32_t qolCameraMax;      // door de GUI gezet
-    uint32_t qolFpsLimit;       // idem
-
-
     char log[SHARED_LOG_BYTES];
 };
-
-// Sentinel voor qolFpsLimit: de begrenzing uit in plaats van een ander getal.
-//
-// Een ander getal afdwingen zou GameEngine::m_maxFPS vereisen, en dat object
-// is alleen op zijn vorm te herkennen. Dat is te mager om in te schrijven.
-// m_useFpsLimit wordt wel elke lus opnieuw gelezen en de offset komt uit de
-// veldtabel van het spel zelf.
-static const uint32_t kFpsUnlimited = 0xFFFFFFFFu;
 
 // Een naam per spelproces, zodat twee draaiende spellen elkaar niet in de weg
 // zitten en een oude mapping niet blijft rondslingeren.

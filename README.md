@@ -31,9 +31,7 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 2 | Getest in de echte game (Generals) | **klaar** |
 | 3 | Compacte GUI met spelherkenning | **klaar** |
 | 3 | Zero Hour: dezelfde DLL, getest in het spel | **klaar** |
-| 4 | Comfortinstellingen (zoom, FPS) via het geheugen | **klaar** |
-| 4 | Zoom naar de View, verankerd op de globale pointer | **klaar, ongetest in het spel** |
-| 4 | FPS-begrenzing aan/uit; eigen getal afdwingen geschrapt | **klaar, ongetest in het spel** |
+| 4 | Comfortinstellingen (zoom, FPS) | **geschrapt, zie hieronder** |
 
 De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
 die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
@@ -139,85 +137,20 @@ code-patches, geen injectie. Alleen lezen.
 
 ---
 
-## Comfortinstellingen
+## Comfortinstellingen: geschrapt
 
-| | Wat | Standaard |
-|---|---|---|
-| **Zoom** | hoe ver je kunt uitzoomen | 300 |
-| **FPS** | de beeldsnelheidsbegrenzing aan of uit | aan (45) |
+Er zat een tijdje een zoom- en een FPS-instelling in. Die zijn **verwijderd**
+nadat ze twee keer een harde reset van de pc nodig maakten. Wat hier staat is
+er niet meer; het staat er zodat niemand, ik incluis, het nog eens probeert
+zonder te weten wat er is gebeurd.
 
-Beide staan onder **Details**. Ze worden **niet onthouden** tussen sessies:
-bij het starten staat alles op Standaard en er wordt niets in het spel
-geschreven tenzij je nu iets kiest. Dat is opzet, zie hieronder.
+De trainer doet nu weer één ding: health-freeze.
 
-De simulatie blijft op 30 Hz lopen. `LOGICFRAMES_PER_SECOND` is een
-compile-time constante en replays zijn lockstep, dus de begrenzing uitzetten
-geeft vloeiender beeld en **geen sneller spel**.
+### Wat er is geprobeerd, en waarom het misging
 
-### Twee versies die het fout deden
-
-Dit onderdeel heeft twee keer schade aangericht, en allebei de keren om een
-reden die achteraf in de broncode te lezen was.
-
-**Een los `GameData.ini`** liet Zero Hour niet meer opstarten. Dat bestand
-bestaat al binnen het `.big`-archief; een los bestand met die naam wint
-daarvan en gooit de rest weg. Uitgewerkt onder
-[Waarom niet via een INI-bestand](#waarom-niet-via-een-ini-bestand).
-
-**Schrijven in `TheGlobalData`** deed daarna niets, want dat zijn
-startwaarden. Het spel kopieert ze eenmalig:
-
-```cpp
-View::init()          m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
-GameEngine::init()    setFramesPerSecondLimit( TheGlobalData->m_framesPerSecondLimit );
-```
-
-De versie die daarop volgde schreef wel in die kopieen, en liet het spel
-crashen. Daar zaten twee fouten in:
-
-1. **`GameEngine::m_maxFPS` werd alleen op zijn vorm herkend**: een object
-   met een rijke vtable waarin toevallig het huidige getal stond, gevolgd
-   door twee bytes die zich als bool gedragen. Dat is geen identificatie,
-   dat is een gok met een schrijfactie erachter. Die functie is verwijderd
-   en de getallen zijn uit de keuzelijst gehaald; er is nu alleen nog aan of
-   uit, en dat loopt over `m_useFpsLimit`, waarvan de offset wel uit de
-   veldtabel van het spel komt.
-
-2. **Het adres van de View werd onthouden.** Vrijgegeven geheugen houdt zijn
-   oude inhoud, dus een vingerafdruk kan blijven kloppen terwijl het blok
-   allang van iets anders is. Elke tik opnieuw in zo'n blok schrijven is dan
-   een kwestie van tijd.
-
-### Hoe de camera nu wordt aangewezen
-
-Vanaf de globale pointer naar binnen, niet vanaf een patroon naar buiten:
-
-```cpp
-View *TheTacticalView = NULL;        // een globale pointer, in .data
-```
-
-Binnen dat object wordt het blok van zes Reals gezocht:
-
-```cpp
-m_maxZoom = 1.3f;      // <- constanten die nergens anders worden geschreven
-m_minZoom = 0.2f;
-m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
-m_minHeightAboveGround = TheGlobalData->m_minCameraHeight;   // <- exacte kopie
-```
-
-Onthouden wordt de **globale pointer**, niet het adres van de View. Elke tik
-wordt hij opnieuw gevolgd, wordt de vtable van het object vergeleken met die
-van bij het injecteren, en wordt de vingerafdruk opnieuw gecontroleerd. Een
-View die opnieuw is aangemaakt wordt zo gewoon meegenomen; een blok dat geen
-View meer is, wordt overgeslagen.
-
-De INI-waarde in `TheGlobalData` wordt ook geschreven, want een View die nog
-gemaakt moet worden leest daaruit.
-
-### Waarom niet via een INI-bestand
-
-De eerste poging was een los `GameData.ini` in `Data\INI\`. Dat liet Zero
-Hour niet meer opstarten. De reden staat in de engine:
+**Poging 1: een los `GameData.ini`.** Zero Hour startte niet meer op. Dat
+bestand bestaat al binnen het `.big`-archief; een los bestand met die naam
+wint daarvan en gooit de rest van het blok weg.
 
 ```cpp
 if (path1) ini.load(path1, INI_LOAD_OVERWRITE, pXfer );  // Default\GameData.ini
@@ -225,51 +158,58 @@ if (path2) ini.load(path2, INI_LOAD_OVERWRITE, pXfer );  // GameData.ini
 ```
 
 Die tests kijken naar de pointer, niet naar het bestand. Het zijn
-string-literals, dus altijd waar. `Data\INI\GameData.ini` bestaat dus al
-binnen het `.big`-archief, met de volledige echte inhoud, en een los bestand
-met die naam **wint** van het archief en gooit de rest weg.
+string-literals, dus altijd waar, en een ontbrekend bestand gooit
+`INI_CANT_OPEN_FILE`.
 
-De geheugenroute heeft dat probleem niet: er wordt niets aan de installatie
-veranderd, niets overschreven, en de INI-checksum (`&xferCRC`) blijft intact.
-Sluit je de trainer af met "Standaard" gekozen, dan is er geen spoor.
-
-### Hoe de INI-offsets gevonden worden
-
-Niet geraden, en ook niet statistisch. De engine bewaart zijn eigen
-veldoffsets in de binary, in de tabel waarmee hij INI-bestanden parseert:
+**Poging 2: schrijven in `TheGlobalData`.** Geen enkel effect. Het zijn
+startwaarden, die het spel eenmalig kopieert:
 
 ```cpp
-static const FieldParse TheGlobalDataFieldParseTable[] = {
-    { "MaxCameraHeight", INI::parseReal, NULL, offsetof( GlobalData, m_maxCameraHeight ) },
-    ...
-};
+View::init()          m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
+GameEngine::init()    setFramesPerSecondLimit( TheGlobalData->m_framesPerSecondLimit );
 ```
 
-met
+**Poging 3: schrijven in die kopieen.** Het spel crashte, en de pc moest
+eraan te pas. Twee fouten: `GameEngine::m_maxFPS` werd alleen op zijn vorm
+herkend (een gok met een schrijfactie erachter), en van de View werd het
+heap-adres onthouden, terwijl vrijgegeven geheugen zijn oude inhoud houdt en
+een vingerafdruk dus kan blijven kloppen voor een blok dat allang van iets
+anders is.
 
-```cpp
-struct FieldParse {
-    const char*      token;      // de naam zoals in de INI
-    INIFieldParseProc parse;
-    const void*      userData;
-    Int              offset;     // offsetof(), letterlijk in de binary
-};
-```
+**Poging 4: de camera verankerd op `View *TheTacticalView`**, de globale
+pointer die de engine zelf bijhoudt, met de vtable en de vingerafdruk als
+controle voor elke schrijfactie, en niets toegepast tenzij er actief voor
+gekozen werd. **Ook dit gaf een harde reset.** Daarmee is de conclusie niet
+"de laatste aanwijzing was nog niet scherp genoeg" maar iets fundamentelers.
 
-Die structuur is in beide spellen gelijk. De trainer zoekt dus de string
-`"MaxCameraHeight"`, zoekt waar een pointer naar die string staat, en leest
-het getal twaalf bytes verderop. Dat **is** `offsetof`, door de compiler van
-jouw eigen build neergezet. Ter controle moet het veld ernaast op een
-uitvoerbare parse-functie wijzen en moet de offset binnen een plausibele
-structgrootte vallen.
+### Wat hieruit te leren valt
 
-`TheGlobalData` zelf is daarna de enige pointer in de schrijfbare data van de
-image waarvan het doelwit op die offsets een geloofwaardige set waarden heeft
-staan: een minimale camerahoogte onder de maximale, en een FPS-limiet tussen
-0 en 1000.
+De health-freeze schrijft **één pointer** in een vtable, op een adres dat
+uit drie onafhankelijke aanwijzingen komt (poolnaam, hitpoint-patroon,
+dubbele link), en die verandering is omkeerbaar. Dat werkt al weken.
 
-`UseFPSLimit` is een `Bool`, dus één byte: er vier schrijven zou de vlag
-ernaast overschrijven. Dat deed een eerdere versie wel.
+De comfortinstellingen schreven **waarden in gewone datavelden** van objecten
+die alleen aan hun inhoud te herkennen zijn. Het verschil lijkt klein en is
+het niet:
+
+- Een vtable-pointer die fout is, crasht meteen en zichtbaar. Een float of
+  een int die fout is, gaat ergens anders stuk, later, en op een plek die
+  niets met de schrijfactie te maken heeft.
+- De health-freeze schrijft **één keer**. De comfortinstellingen schreven
+  **elke tik opnieuw**, want het spel zette ze terug. Een adres dat vandaag
+  klopt en over tien seconden niet meer, wordt dan tien keer per seconde een
+  nieuwe kans op schade.
+- Een verkeerd adres is niet te detecteren zonder het te gebruiken. Er is
+  geen manier om vanaf deze kant te controleren of een schrijfactie goed
+  terechtkwam, en de enige testmachine is die van de gebruiker.
+
+Wie dit opnieuw wil proberen: doe het niet met een schrijfactie die zichzelf
+herhaalt, en niet op een object dat alleen op zijn inhoud te herkennen is.
+De INI-route (poging 1) is wel werkbaar, mits je het originele
+`GameData.ini` uit `INI.big` of `INIZH.big` haalt, je regels **toevoegt** en
+het resultaat terugzet. Dan raakt de trainer het geheugen niet aan. Reken wel
+op een mismatch in netwerkpotjes, want `GameData.ini` telt mee in de
+INI-checksum.
 
 ## De trainer gebruiken
 
@@ -306,8 +246,8 @@ hetzelfde zonder alt-tabben. Die is instelbaar (standaard **F9**) omdat de
 voor de hand liggende toetsen bezet zijn: F12 is Steam's screenshot en F10
 opent het venstermenu van Windows.
 
-Onder **Details** zitten het log, de zoom- en FPS-keuze, en **Hook
-verwijderen**, dat de oorspronkelijke vtable-pointer terugzet.
+Onder **Details** zitten het log en **Hook verwijderen**, dat de
+oorspronkelijke vtable-pointer terugzet.
 
 ### Werkt dit ook op Zero Hour?
 

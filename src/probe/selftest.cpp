@@ -90,25 +90,6 @@ enum : uint32_t {
 
     FAKE_VT_REFS      = 400,
 
-    // Een nagebouwde INI-veldtabel. De engine bewaart de offsets van zijn
-    // eigen velden naast de naam:
-    //   struct FieldParse { const char* token; proc parse; const void* ud; Int offset; }
-    INI_STR_ADDR      = 0x00405000,   // "MaxCameraHeight"
-    INI_STR2_ADDR     = 0x00405020,   // "MinCameraHeight"
-    INI_TABLE_ADDR    = 0x00405100,
-    INI_OFF_MAXCAM    = 0x0120,       // de offsets die we moeten terugvinden
-    INI_OFF_MINCAM    = 0x0124,
-
-    INI_OFF_FPS       = 0x0128,
-    GLOBALDATA_PTR    = 0x00411800,   // de globale pointer, in schrijfbare data
-
-    // Het spel leest tijdens een potje niet uit GlobalData maar uit de kopie
-    // in de View. Die wordt gezocht vanaf de globale pointer.
-    VIEW_PTR          = 0x00411810,   // "TheTacticalView", in schrijfbare data
-    VIEW_DECOY_PTR    = 0x00411818,   // zelfde vorm, verkeerde minimumhoogte
-    VIEW_BLOCK_OFF    = 0x0030,       // m_maxZoom binnen het object
-    VT_VIEW           = 0x00409000,
-
     // Naamanker-regressie: een poolnaam in alleen-lezen data, een verwijzing
     // ernaar in "code", en vlakbij een verwijzing naar de body-vtable. Zo
     // moet findNameAnchors de klasse op naam kunnen aanwijzen.
@@ -139,9 +120,9 @@ struct Space {
     void putf(uint32_t addr, float value) {
         memcpy(heapAt(addr), &value, 4);
     }
-    // Legt een vtable neer waarvan elk slot naar CODE_ADDR wijst.
-    uint32_t makeVtable(uint32_t addr, int slots = 8) {
-        for (int i = 0; i < slots; ++i) {
+    // Legt een vtable van acht slots neer die allemaal naar CODE_ADDR wijzen.
+    uint32_t makeVtable(uint32_t addr) {
+        for (int i = 0; i < 8; ++i) {
             uint32_t fn = CODE_ADDR + (uint32_t)i * 0x10;
             memcpy(imgAt(addr) + i * 4, &fn, 4);
         }
@@ -188,63 +169,6 @@ int runSelfTest() {
         memcpy(sp.imgAt(NAME_XREF_ADDR), &sref, 4);
         uint32_t vref = vtBodyIf;
         memcpy(sp.imgAt(NAME_XREF_ADDR) + 0x23, &vref, 4);
-    }
-
-    // Een veldtabel neerleggen, plus een object waar de offsets naar wijzen
-    // en een globale pointer daarnaartoe.
-    {
-        const char* n1 = "MaxCameraHeight";
-        const char* n2 = "MinCameraHeight";
-        memcpy(sp.imgAt(INI_STR_ADDR), n1, strlen(n1) + 1);
-        memcpy(sp.imgAt(INI_STR2_ADDR), n2, strlen(n2) + 1);
-
-        uint32_t entry[8] = {
-            INI_STR_ADDR,  CODE_ADDR, 0, INI_OFF_MAXCAM,
-            INI_STR2_ADDR, CODE_ADDR, 0, INI_OFF_MINCAM,
-        };
-        memcpy(sp.imgAt(INI_TABLE_ADDR), entry, sizeof(entry));
-
-        uint32_t gd = sp.alloc(0x400);
-        sp.putf(gd + INI_OFF_MAXCAM, 300.0f);
-        sp.putf(gd + INI_OFF_MINCAM, 100.0f);
-        sp.put(gd + INI_OFF_FPS, 45);
-        memcpy(sp.dataAt(GLOBALDATA_PTR), &gd, 4);
-    }
-
-    // De View, met zijn eigen kopie van de camerabegrenzing:
-    //
-    //   Real m_maxZoom, m_minZoom, m_maxHeightAboveGround,
-    //        m_minHeightAboveGround, m_zoom, m_heightAboveGround;
-    //
-    // Twee valstrikken. De eerste is een blok met dezelfde zoomconstanten dat
-    // door GEEN globale pointer wordt aangewezen: precies wat vrijgegeven
-    // geheugen oplevert, want dat houdt zijn oude inhoud. De tweede staat wel
-    // achter een pointer maar heeft een minimumhoogte die niet bij GlobalData
-    // hoort.
-    uint32_t viewAddr = 0;
-    {
-        const uint32_t vtView = sp.makeVtable(VT_VIEW, 20);
-
-        auto layView = [&](uint32_t obj, float minH) {
-            sp.put(obj, vtView);
-            sp.putf(obj + VIEW_BLOCK_OFF + 0,  1.3f);
-            sp.putf(obj + VIEW_BLOCK_OFF + 4,  0.2f);
-            sp.putf(obj + VIEW_BLOCK_OFF + 8,  300.0f);
-            sp.putf(obj + VIEW_BLOCK_OFF + 12, minH);
-            sp.putf(obj + VIEW_BLOCK_OFF + 16, 1.1f);
-            sp.putf(obj + VIEW_BLOCK_OFF + 20, 250.0f);
-        };
-
-        viewAddr = sp.alloc(0x100);
-        layView(viewAddr, 100.0f);
-        memcpy(sp.dataAt(VIEW_PTR), &viewAddr, 4);
-
-        uint32_t loose = sp.alloc(0x100);   // niet aangewezen
-        layView(loose, 100.0f);
-
-        uint32_t decoy = sp.alloc(0x100);
-        layView(decoy, 77.0f);              // geen kopie van m_minCameraHeight
-        memcpy(sp.dataAt(VIEW_DECOY_PTR), &decoy, 4);
     }
 
     // Spelers: alle zestien slots worden gealloceerd, precies zoals
@@ -449,48 +373,6 @@ int runSelfTest() {
              hv.empty() ? "niets" : (hv[0].vtable == vtBodyIf ? "juiste vtable" : "verkeerde vtable"),
              hv.empty() ? 0.0 : hv[0].ratio * 100.0);
     check("body-module herkend aan hitpoints", bodyOnTop, detail);
-
-    // --- offsets uit de INI-veldtabel --------------------------------------
-    {
-        std::vector<IniField> fields =
-            findIniFields(t, {"MaxCameraHeight", "MinCameraHeight"}, 0x8000);
-        uint32_t offMax = 0, offMin = 0;
-        for (const IniField& f : fields) {
-            if (f.name == "MaxCameraHeight") offMax = f.offset;
-            if (f.name == "MinCameraHeight") offMin = f.offset;
-        }
-        snprintf(detail, sizeof(detail), "+0x%x en +0x%x", offMax, offMin);
-        check("offsets uit de veldtabel gelezen",
-              offMax == INI_OFF_MAXCAM && offMin == INI_OFF_MINCAM, detail);
-
-        // "MinCameraHeight" mag niet gevonden worden als staart van iets
-        // langers, en de twee namen mogen elkaar niet verwisselen.
-        check("namen niet door elkaar gehaald", offMax != offMin);
-
-        GlobalDataHit g;
-        bool found = findGlobalData(t, offMax, offMin, INI_OFF_FPS, &g);
-        snprintf(detail, sizeof(detail), "%s",
-                 found ? "pointer gevonden" : "niets gevonden");
-        check("TheGlobalData via de offsets gevonden",
-              found && g.pointerAddr == GLOBALDATA_PTR &&
-              g.maxCameraHeight == 300.0f, detail);
-
-        // De kopie in de View is wat er tijdens een potje telt. GlobalData
-        // aanpassen doet niets aan een kaart die al geladen is.
-        std::vector<ViewHit> views = findViews(t, 100.0f, 300.0f);
-        bool viewOk = (views.size() == 1) &&
-                      views[0].globalAddr == VIEW_PTR &&
-                      views[0].instance == viewAddr &&
-                      views[0].blockOffset == VIEW_BLOCK_OFF &&
-                      views[0].maxHeight == 300.0f;
-        snprintf(detail, sizeof(detail), "%u kandidaat/kandidaten via .data",
-                 (unsigned)views.size());
-        check("camerabegrenzing via de globale pointer", viewOk, detail);
-
-        // Het losse blok met dezelfde constanten mag niet meetellen: dat is
-        // wat vrijgegeven geheugen oplevert.
-        check("blok zonder globale pointer genegeerd", views.size() == 1);
-    }
 
     // --- klasse op naam aanwijzen -----------------------------------------
     {

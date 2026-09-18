@@ -311,139 +311,6 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
     return 1;
 }
 
-// -------------------------------------------------------- comfortinstellingen --
-//
-// Eerste poging: de waarden in TheGlobalData zetten. Dat had geen effect in
-// het spel, en de broncode zegt waarom. Beide instellingen worden daar
-// eenmalig uit gekopieerd:
-//
-//   View::init()          m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
-//   GameEngine::init()    setFramesPerSecondLimit( TheGlobalData->m_framesPerSecondLimit );
-//
-// en daarna kijkt het spel alleen nog naar die kopieen. Een kaart die al
-// geladen is trekt zich dus niets aan van GlobalData.
-//
-// Nu wordt allebei geschreven: de kopie voor het huidige potje, en de
-// INI-waarde voor alles wat er later uit wordt afgeleid.
-//
-// Een uitzondering is m_useFpsLimit: die wordt wel elke lus opnieuw gelezen,
-// dus "onbeperkt" werkt altijd, ook zonder dat we m_maxFPS hebben gevonden.
-
-static uint32_t g_qolLastCamera = 0xFFFFFFFFu;
-static uint32_t g_qolLastFps = 0xFFFFFFFFu;
-
-static void* globalData() {
-    if (!g_r.qolOk || !g_r.globalDataPtr) return nullptr;
-    void* p = *(void**)g_r.globalDataPtr;
-    return ptrOk(p) ? p : nullptr;
-}
-
-// Is dit adres nu echt te lezen? De adressen zijn bij het injecteren gemeten
-// en er kan sindsdien een kaart geladen zijn. Een bereikcontrole alleen is
-// hier niet genoeg, want een vrijgegeven pagina ligt in hetzelfde bereik.
-static bool readableAt(const void* p, size_t n) {
-    if (!ptrOk(p)) return false;
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(p, &mbi, sizeof(mbi))) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    const DWORD ok = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                     PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                     PAGE_EXECUTE_WRITECOPY;
-    if (!(mbi.Protect & ok)) return false;
-    const uintptr_t endOfRegion = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    return (uintptr_t)p + n <= endOfRegion;
-}
-
-// Het adres van m_maxHeightAboveGround, elke keer opnieuw afgeleid vanaf de
-// globale pointer. Nooit een onthouden heap-adres: vrijgegeven geheugen
-// houdt zijn oude inhoud, dus een vingerafdruk kan blijven kloppen terwijl
-// het blok allang van iets anders is.
-static float* viewMaxHeight(uint32_t i) {
-    if (i >= g_r.viewCount || !g_r.viewGlobal[i]) return nullptr;
-
-    if (!readableAt((const void*)g_r.viewGlobal[i], sizeof(void*))) return nullptr;
-    const char* obj = *(const char* const*)g_r.viewGlobal[i];
-    if (!ptrOk(obj)) return nullptr;
-
-    // Dezelfde klasse als bij het injecteren? Een View die opnieuw is
-    // aangemaakt heeft dezelfde vtable; iets anders heeft dat niet.
-    if (!readableAt(obj, sizeof(uintptr_t))) return nullptr;
-    if (*(const uintptr_t*)obj != g_r.viewVtable[i]) return nullptr;
-
-    const float* f = (const float*)(obj + g_r.viewBlockOffset[i]);
-    if (!readableAt(f, 24)) return nullptr;
-    if (f[0] != 1.3f || f[1] != 0.2f) return nullptr;
-    if (f[3] != g_r.viewMinHeight) return nullptr;
-    return (float*)(f + 2);
-}
-
-// Zet de gewenste waarden, of herstelt het origineel bij nul. Draait elke
-// tik, want een nieuwe kaart zet de View-kopie terug.
-static void applyQol() {
-    if (!g_shared || !g_r.qolOk) return;
-
-    const uint32_t wantCam = g_shared->qolCameraMax;
-    const uint32_t wantFps = g_shared->qolFpsLimit;
-    const bool changed = (wantCam != g_qolLastCamera) || (wantFps != g_qolLastFps);
-    const bool unlimited = (wantFps == kFpsUnlimited);
-
-    char* base = (char*)globalData();
-
-    // --- camerahoogte ---------------------------------------------------
-    if (base && g_r.offMaxCameraHeight) {
-        float* p = (float*)(base + g_r.offMaxCameraHeight);
-        const float want = wantCam ? (float)wantCam : g_r.origMaxCameraHeight;
-        if (*p != want) *p = want;      // voor een View die nog moet komen
-    }
-    uint32_t viewsWritten = 0;
-    for (uint32_t i = 0; i < g_r.viewCount; ++i) {
-        float* p = viewMaxHeight(i);
-        if (!p) continue;
-        const float want = wantCam ? (float)wantCam : g_r.viewOrigMax[i];
-        if (*p != want) *p = want;
-        ++viewsWritten;
-    }
-    if (changed)
-        logf("[zp] camerahoogte: %.0f (%u camera%s)\n",
-             wantCam ? (double)wantCam : (double)g_r.origMaxCameraHeight,
-             viewsWritten, viewsWritten == 1 ? "" : "'s");
-
-    // --- beeldsnelheid ---------------------------------------------------
-    //
-    // m_useFpsLimit is een Bool, dus een byte. Er vier schrijven zou de vlag
-    // ernaast overschrijven.
-    if (base && g_r.offUseFpsLimit) {
-        uint8_t* p = (uint8_t*)(base + g_r.offUseFpsLimit);
-        const uint8_t want = unlimited ? 0u
-                           : wantFps   ? 1u
-                                       : g_r.origUseFpsLimit;
-        if (*p != want) *p = want;
-    }
-
-    if (changed)
-        logf("[zp] fps-begrenzing: %s\n", unlimited ? "uit" : "aan");
-
-    g_qolLastCamera = wantCam;
-    g_qolLastFps = wantFps;
-}
-
-static void restoreQol() {
-    if (!g_r.qolOk) return;
-
-    for (uint32_t i = 0; i < g_r.viewCount; ++i) {
-        float* p = viewMaxHeight(i);
-        if (p) *p = g_r.viewOrigMax[i];
-    }
-    char* base = (char*)globalData();
-    if (!base) return;
-    if (g_r.offMaxCameraHeight)
-        *(float*)(base + g_r.offMaxCameraHeight) = g_r.origMaxCameraHeight;
-    if (g_r.offFramesPerSecondLimit)
-        *(int32_t*)(base + g_r.offFramesPerSecondLimit) = g_r.origFramesPerSecondLimit;
-    if (g_r.offUseFpsLimit)
-        *(uint8_t*)(base + g_r.offUseFpsLimit) = g_r.origUseFpsLimit;
-}
-
 // ----------------------------------------------------------------- de hook --
 
 static bool installHook() {
@@ -555,14 +422,6 @@ static DWORD WINAPI worker(LPVOID) {
     logf("[zp] hook geplaatst, onkwetsbaarheid staat AAN.\n");
     status();
 
-    // Comfortinstellingen aanbieden als de resolutie ze heeft gevonden.
-    if (g_shared && g_r.qolOk) {
-        g_shared->qolAvailable = 1;
-        g_shared->qolOrigCameraMax = (uint32_t)(g_r.origMaxCameraHeight + 0.5f);
-        g_shared->qolOrigFpsLimit = (uint32_t)(g_r.origFramesPerSecondLimit < 0
-                                               ? 0 : g_r.origFramesPerSecondLimit);
-    }
-
     if (g_shared) {
         g_shared->hooked = 1;
         g_shared->enabled = 1;
@@ -594,7 +453,6 @@ static DWORD WINAPI worker(LPVOID) {
 
             if (g_shared->requestUnhook) {
                 g_enabled = false;
-                restoreQol();
                 removeHook();
                 g_shared->hooked = 0;
                 g_shared->enabled = 0;
@@ -604,8 +462,6 @@ static DWORD WINAPI worker(LPVOID) {
                 return 0;
             }
         }
-
-        applyQol();
 
         // De sneltoets is instelbaar omdat de voor de hand liggende toetsen
         // bezet zijn: F12 is standaard Steam's screenshot en F10 opent het
@@ -632,7 +488,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
         CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         g_enabled = false;
-        restoreQol();
         removeHook();
     }
     return TRUE;

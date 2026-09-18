@@ -29,15 +29,13 @@ enum : int {
     ID_UNHOOK,
     ID_COPYLOG,
     ID_HOTKEY,
-    ID_CAMERA,
-    ID_FPS,
     ID_TIMER = 1,
 };
 
 enum : int {
     W_CLIENT      = 344,
-    H_COMPACT     = 232,
-    H_EXPANDED    = 506,
+    H_COMPACT     = 196,
+    H_EXPANDED    = 470,
 };
 
 struct HotkeyChoice { const wchar_t* label; uint32_t vk; };
@@ -62,40 +60,14 @@ static const HotkeyChoice kHotkeys[] = {
 };
 static const int kHotkeyCount = (int)(sizeof(kHotkeys) / sizeof(kHotkeys[0]));
 
-// Comfortinstellingen. Nul betekent: laat staan zoals het spel het had.
-struct Choice { const wchar_t* label; uint32_t value; };
-
-// Standaard staat het maximum op 300. Boven ongeveer 600 zie je de rand van
-// de kaart, dus daar houdt het op.
-static const Choice kCameraChoices[] = {
-    {L"Standaard", 0}, {L"Ruim (450)", 450},
-    {L"Heel ruim (600)", 600}, {L"Maximaal (750)", 750},
-};
-static const int kCameraCount = (int)(sizeof(kCameraChoices) / sizeof(kCameraChoices[0]));
-
-// De simulatie blijft op 30 Hz; dit maakt alleen het beeld vloeiender.
-//
-// Alleen aan of uit, geen getallen. Een eigen limiet afdwingen vereist
-// GameEngine::m_maxFPS, en dat object is alleen op zijn vorm te herkennen.
-// Dat bleek te mager: een build die daarin schreef liet het spel crashen.
-// m_useFpsLimit wordt wel elke lus opnieuw gelezen en de offset komt uit de
-// veldtabel van het spel zelf.
-static const Choice kFpsChoices[] = {
-    {L"Standaard", 0}, {L"Onbeperkt", kFpsUnlimited},
-};
-static const int kFpsCount = (int)(sizeof(kFpsChoices) / sizeof(kFpsChoices[0]));
-
 static HWND g_main, g_lblStatus, g_btnPrimary, g_lblBlocked, g_lblHotkey;
 static HWND g_cbHotkey, g_btnDetails, g_btnUnhook, g_btnCopy, g_log, g_lblWarn;
-static HWND g_lblQol, g_cbCamera, g_cbFps;
 static HFONT g_font, g_fontBig;
 
 static DWORD    g_gamePid = 0;
 static HANDLE   g_mapping = nullptr;
 static Shared*  g_shared = nullptr;
 static uint32_t g_hotkeyVk = VK_F9;
-static uint32_t g_cameraMax = 0;
-static uint32_t g_fpsLimit = 0;
 static uint32_t g_lastLogLen = 0;
 static bool     g_expanded = false;
 static bool     g_autoExpanded = false;   // eenmalig uitklappen bij een fout
@@ -125,26 +97,15 @@ static std::wstring gameLabelFor(DWORD pid, const std::string& procName) {
 
 static std::string iniPath() { return pathNextToExe("zeropatience.ini"); }
 
-// Alleen de sneltoets wordt onthouden. De comfortinstellingen bewust niet:
-// die grijpen in het geheugen van het spel in, en een onthouden waarde zou
-// bij het koppelen meteen worden toegepast zonder dat je erom vroeg. Na een
-// crash wil je dat je niets doet tenzij je er nu voor kiest.
 static void loadSettings() {
     g_hotkeyVk = (uint32_t)GetPrivateProfileIntA("trainer", "hotkey", VK_F9,
                                                  iniPath().c_str());
-    g_cameraMax = 0;
-    g_fpsLimit = 0;
 }
 
 static void saveSettings() {
     char buf[32];
     snprintf(buf, sizeof(buf), "%u", g_hotkeyVk);
     WritePrivateProfileStringA("trainer", "hotkey", buf, iniPath().c_str());
-
-    // Oude sleutels opruimen, zodat een bestaande zeropatience.ini niet
-    // alsnog een waarde meebrengt.
-    WritePrivateProfileStringA("trainer", "cameramax", nullptr, iniPath().c_str());
-    WritePrivateProfileStringA("trainer", "fpslimit", nullptr, iniPath().c_str());
 }
 
 // -------------------------------------------------------- gedeeld geheugen --
@@ -310,15 +271,6 @@ static void refresh() {
 
     EnableWindow(g_btnUnhook, ready);
 
-    // De comfortknoppen kunnen pas iets als de DLL TheGlobalData heeft
-    // gevonden. Lukt dat niet, dan blijven ze grijs in plaats van stilletjes
-    // niets te doen.
-    const bool qol = connected && g_shared->qolAvailable != 0;
-    EnableWindow(g_cbCamera, qol);
-    EnableWindow(g_cbFps, qol);
-    EnableWindow(g_lblQol, qol);
-
-
     // Bij een fout klapt het venster eenmalig uit: dan wil je het log zien.
     if (connected && state == STATE_FAILED && !g_autoExpanded && !g_expanded) {
         g_autoExpanded = true;
@@ -355,47 +307,21 @@ static void buildUi(HWND w) {
 
     g_lblBlocked = mk(L"STATIC", L"", 0, 14, 98, W_CLIENT - 28, 20, w, 0);
 
-    // Comfortinstellingen. Deze schrijven rechtstreeks in TheGlobalData en
-    // werken meteen, zonder het spel te herstarten.
-    g_lblQol = mk(L"STATIC", L"Zoom", 0, 14, 128, 40, 18, w, 0);
-    g_cbCamera = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
-                    56, 124, 130, 200, w, ID_CAMERA);
-    for (const Choice& c : kCameraChoices)
-        SendMessageW(g_cbCamera, CB_ADDSTRING, 0, (LPARAM)c.label);
-    int csel = 0;
-    for (int i = 0; i < kCameraCount; ++i)
-        if (kCameraChoices[i].value == g_cameraMax) csel = i;
-    SendMessageW(g_cbCamera, CB_SETCURSEL, csel, 0);
-
-    mk(L"STATIC", L"FPS", 0, 196, 128, 30, 18, w, 0);
-    g_cbFps = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
-                 228, 124, 102, 200, w, ID_FPS);
-    // De waarde hangt aan het item zelf. Zodra er een keuze wegvalt omdat de
-    // DLL hem niet kan waarmaken, klopt de index niet meer met de tabel.
-    for (const Choice& c : kFpsChoices) {
-        int at = (int)SendMessageW(g_cbFps, CB_ADDSTRING, 0, (LPARAM)c.label);
-        SendMessageW(g_cbFps, CB_SETITEMDATA, (WPARAM)at, (LPARAM)c.value);
-    }
-    int fsel = 0;
-    for (int i = 0; i < kFpsCount; ++i)
-        if (kFpsChoices[i].value == g_fpsLimit) fsel = i;
-    SendMessageW(g_cbFps, CB_SETCURSEL, fsel, 0);
-
     g_btnDetails = mk(L"BUTTON", L"Details", BS_PUSHBUTTON,
-                      14, 162, 90, 28, w, ID_DETAILS);
+                      14, 126, 90, 28, w, ID_DETAILS);
     g_btnUnhook = mk(L"BUTTON", L"Loskoppelen", BS_PUSHBUTTON,
-                     112, 162, 110, 28, w, ID_UNHOOK);
+                     112, 126, 110, 28, w, ID_UNHOOK);
     g_btnCopy = mk(L"BUTTON", L"Log kopieren", BS_PUSHBUTTON,
-                   230, 162, 100, 28, w, ID_COPYLOG);
+                   230, 126, 100, 28, w, ID_COPYLOG);
 
     g_lblWarn = mk(L"STATIC",
         L"Alleen voor skirmish en campagne. Zet dit zelf uit in multiplayer.",
-        0, 14, 198, W_CLIENT - 28, 18, w, 0);
+        0, 14, 162, W_CLIENT - 28, 18, w, 0);
 
     g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                             WS_CHILD | WS_VSCROLL | ES_MULTILINE |
                             ES_READONLY | ES_AUTOVSCROLL,
-                            14, 224, W_CLIENT - 28, 268, w, nullptr,
+                            14, 188, W_CLIENT - 28, 268, w, nullptr,
                             GetModuleHandleW(nullptr), nullptr);
     SendMessageW(g_log, WM_SETFONT, (WPARAM)g_font, TRUE);
 
@@ -502,25 +428,6 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (id == ID_COPYLOG) { copyLog(); return 0; }
-            if (id == ID_CAMERA && HIWORD(wp) == CBN_SELCHANGE) {
-                int sel = (int)SendMessageW(g_cbCamera, CB_GETCURSEL, 0, 0);
-                if (sel >= 0 && sel < kCameraCount) {
-                    g_cameraMax = kCameraChoices[sel].value;
-                    if (g_shared) g_shared->qolCameraMax = g_cameraMax;
-                    saveSettings();
-                }
-                return 0;
-            }
-            if (id == ID_FPS && HIWORD(wp) == CBN_SELCHANGE) {
-                int sel = (int)SendMessageW(g_cbFps, CB_GETCURSEL, 0, 0);
-                if (sel >= 0) {
-                    g_fpsLimit = (uint32_t)SendMessageW(g_cbFps, CB_GETITEMDATA,
-                                                       (WPARAM)sel, 0);
-                    if (g_shared) g_shared->qolFpsLimit = g_fpsLimit;
-                    saveSettings();
-                }
-                return 0;
-            }
             if (id == ID_HOTKEY && HIWORD(wp) == CBN_SELCHANGE) {
                 int sel = (int)SendMessageW(g_cbHotkey, CB_GETCURSEL, 0, 0);
                 if (sel >= 0 && sel < kHotkeyCount) {
