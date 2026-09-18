@@ -100,6 +100,7 @@ static bool attachShared(DWORD pid) {
         return false;
     }
     g_shared->hotkeyVk = g_hotkeyVk;
+    g_hookedPid = pid;   // ook als de sessie via zp-inject.exe is gestart
     return true;
 }
 
@@ -361,7 +362,9 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
-    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX icc;
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
     loadSettings();
 
@@ -373,7 +376,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
         g_font = CreateFontIndirectW(&ncm.lfMessageFont);
     if (!g_font) g_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-    WNDCLASSEXW wc = {sizeof(wc)};
+    WNDCLASSEXW wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = wndProc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
