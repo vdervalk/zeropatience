@@ -71,8 +71,18 @@ struct Shared {
     uint32_t qolCameraMax;      // door de GUI gezet
     uint32_t qolFpsLimit;       // idem
 
+    // Een exacte fps-limiet vereist GameEngine::m_maxFPS, want de
+    // begrenzingslus leest die kopie en niet de INI-waarde. Wordt die niet
+    // eenduidig gevonden, dan blijven alleen Standaard en Onbeperkt over;
+    // die twee lopen namelijk over m_useFpsLimit, en die wordt wel elke lus
+    // opnieuw gelezen.
+    uint32_t qolExactFps;       // door de DLL gezet
+
     char log[SHARED_LOG_BYTES];
 };
+
+// Sentinel voor qolFpsLimit: geen begrenzing in plaats van een getal.
+static const uint32_t kFpsUnlimited = 0xFFFFFFFFu;
 
 // Een naam per spelproces, zodat twee draaiende spellen elkaar niet in de weg
 // zitten en een oude mapping niet blijft rondslingeren.

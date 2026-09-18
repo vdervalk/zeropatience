@@ -74,8 +74,14 @@ static const Choice kCameraChoices[] = {
 static const int kCameraCount = (int)(sizeof(kCameraChoices) / sizeof(kCameraChoices[0]));
 
 // De simulatie blijft op 30 Hz; dit maakt alleen het beeld vloeiender.
+//
+// "Onbeperkt" staat er apart in omdat het over een andere vlag loopt dan de
+// getallen. De begrenzingslus leest m_useFpsLimit elke keer opnieuw, maar het
+// getal zelf staat in een kopie binnen GameEngine. Uitzetten kan dus altijd,
+// een ander getal alleen als die kopie gevonden is.
 static const Choice kFpsChoices[] = {
     {L"Standaard", 0}, {L"60", 60}, {L"90", 90}, {L"120", 120}, {L"144", 144},
+    {L"Onbeperkt", kFpsUnlimited},
 };
 static const int kFpsCount = (int)(sizeof(kFpsChoices) / sizeof(kFpsChoices[0]));
 
@@ -309,6 +315,29 @@ static void refresh() {
     EnableWindow(g_cbFps, qol);
     EnableWindow(g_lblQol, qol);
 
+    // Een exacte limiet vereist GameEngine::m_maxFPS. Ontbreekt die, dan
+    // blijven Standaard en Onbeperkt over en zeggen we dat een keer, in
+    // plaats van keuzes aan te bieden die niets doen.
+    static bool warnedFps = false;
+    if (qol && !g_shared->qolExactFps && !warnedFps) {
+        warnedFps = true;
+        for (int i = 0; i < kFpsCount; ++i) {
+            if (kFpsChoices[i].value == 0 || kFpsChoices[i].value == kFpsUnlimited)
+                continue;
+            SendMessageW(g_cbFps, CB_DELETESTRING, (WPARAM)i, 0);
+            --i;
+        }
+        if (g_fpsLimit != 0 && g_fpsLimit != kFpsUnlimited) {
+            g_fpsLimit = 0;
+            g_shared->qolFpsLimit = 0;
+        }
+        int sel = 0;
+        for (int i = 0; i < (int)SendMessageW(g_cbFps, CB_GETCOUNT, 0, 0); ++i)
+            if ((uint32_t)SendMessageW(g_cbFps, CB_GETITEMDATA, (WPARAM)i, 0) == g_fpsLimit)
+                sel = i;
+        SendMessageW(g_cbFps, CB_SETCURSEL, sel, 0);
+    }
+
     // Bij een fout klapt het venster eenmalig uit: dan wil je het log zien.
     if (connected && state == STATE_FAILED && !g_autoExpanded && !g_expanded) {
         g_autoExpanded = true;
@@ -360,8 +389,12 @@ static void buildUi(HWND w) {
     mk(L"STATIC", L"FPS", 0, 196, 128, 30, 18, w, 0);
     g_cbFps = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
                  228, 124, 102, 200, w, ID_FPS);
-    for (const Choice& c : kFpsChoices)
-        SendMessageW(g_cbFps, CB_ADDSTRING, 0, (LPARAM)c.label);
+    // De waarde hangt aan het item zelf. Zodra er een keuze wegvalt omdat de
+    // DLL hem niet kan waarmaken, klopt de index niet meer met de tabel.
+    for (const Choice& c : kFpsChoices) {
+        int at = (int)SendMessageW(g_cbFps, CB_ADDSTRING, 0, (LPARAM)c.label);
+        SendMessageW(g_cbFps, CB_SETITEMDATA, (WPARAM)at, (LPARAM)c.value);
+    }
     int fsel = 0;
     for (int i = 0; i < kFpsCount; ++i)
         if (kFpsChoices[i].value == g_fpsLimit) fsel = i;
@@ -499,8 +532,9 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (id == ID_FPS && HIWORD(wp) == CBN_SELCHANGE) {
                 int sel = (int)SendMessageW(g_cbFps, CB_GETCURSEL, 0, 0);
-                if (sel >= 0 && sel < kFpsCount) {
-                    g_fpsLimit = kFpsChoices[sel].value;
+                if (sel >= 0) {
+                    g_fpsLimit = (uint32_t)SendMessageW(g_cbFps, CB_GETITEMDATA,
+                                                       (WPARAM)sel, 0);
                     if (g_shared) g_shared->qolFpsLimit = g_fpsLimit;
                     saveSettings();
                 }

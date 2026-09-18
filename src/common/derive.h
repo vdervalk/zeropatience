@@ -258,6 +258,64 @@ struct GlobalDataHit {
 bool findGlobalData(const Target& t, uint32_t offMaxCam, uint32_t offMinCam,
                     uint32_t offFpsLimit, GlobalDataHit* out);
 
+// --- de camera zelf, niet alleen de standaardwaarde --------------------
+//
+// TheGlobalData->m_maxCameraHeight is niet wat de camera begrenst. De View
+// kopieert die waarde eenmalig bij init:
+//
+//   m_maxZoom = 1.3f;
+//   m_minZoom = 0.2f;
+//   m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
+//   m_minHeightAboveGround = TheGlobalData->m_minCameraHeight;
+//
+// en daarna klemt setHeightAboveGround() op die kopie. GlobalData aanpassen
+// terwijl er al een kaart geladen is doet dus niets, en dat is precies wat
+// er in het spel gebeurde.
+//
+// Die vier Reals staan in declaratievolgorde achter elkaar, en de eerste
+// twee zijn constanten die nergens anders worden geschreven. 1.3f gevolgd
+// door 0.2f is daarmee een exacte acht-byte vingerafdruk; de rest van het
+// blok bevestigt hem.
+struct ViewHit {
+    uint64_t addr = 0;          // adres van m_maxZoom, begin van het blok
+    uint64_t maxHeightAddr = 0; // +8, waar geschreven moet worden
+    float    maxHeight = 0;
+    float    minHeight = 0;
+    float    zoom = 0;
+    float    height = 0;
+};
+std::vector<ViewHit> findViews(const Target& t, float minCameraHeight,
+                               float maxCameraHeight);
+
+// --- GameEngine::m_maxFPS ----------------------------------------------
+//
+// De begrenzingslus leest niet de INI-waarde maar een kopie in GameEngine:
+//
+//   DWORD limit = (1000.0f/m_maxFPS)-1;
+//   while (TheGlobalData->m_useFpsLimit && (now - prevTime) < limit) ...
+//
+// m_maxFPS wordt eenmalig gezet in GameEngine::init(). m_useFpsLimit wordt
+// wel elke lus opnieuw gelezen; dat is het verschil tussen "uitzetten" (kan
+// altijd) en "een ander getal" (moet hier langs).
+//
+// De klasse is klein en de vorm ligt vast:
+//
+//   class GameEngine : public SubsystemInterface { ... Int m_maxFPS;
+//                                                      Bool m_quitting;
+//                                                      Bool m_isActive; };
+//
+// Dus: een object met een rijke vtable, aangewezen door een globale pointer
+// in de data van het image, met de huidige limiet gevolgd door twee bytes
+// die zich als bool gedragen en een m_quitting die nul is. Levert dat meer
+// dan een kandidaat op, dan schrijven we niets.
+struct EngineHit {
+    uint64_t pointerAddr = 0;   // TheGameEngine
+    uint64_t instance = 0;
+    uint64_t vtable = 0;
+    uint32_t offMaxFps = 0;
+};
+bool findGameEngine(const Target& t, int32_t fpsLimit, EngineHit* out);
+
 // Volledig vtable-histogram als map, zodat instantietellingen elders
 // opzoekbaar zijn zonder opnieuw te scannen.
 std::map<uint64_t, uint64_t> vtableCounts(const Target& t);

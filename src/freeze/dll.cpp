@@ -313,11 +313,21 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
 
 // -------------------------------------------------------- comfortinstellingen --
 //
-// TheGlobalData is een gewone struct op de heap; we schrijven er rechtstreeks
-// in. Geen hook nodig, want deze waarden worden elke frame opnieuw gelezen.
+// Eerste poging: de waarden in TheGlobalData zetten. Dat had geen effect in
+// het spel, en de broncode zegt waarom. Beide instellingen worden daar
+// eenmalig uit gekopieerd:
 //
-// De pointer ernaartoe staat vast in de data van het image, dus dit blijft
-// geldig als je een nieuw potje start. Het object zelf kan verhuizen.
+//   View::init()          m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
+//   GameEngine::init()    setFramesPerSecondLimit( TheGlobalData->m_framesPerSecondLimit );
+//
+// en daarna kijkt het spel alleen nog naar die kopieen. Een kaart die al
+// geladen is trekt zich dus niets aan van GlobalData.
+//
+// Nu wordt allebei geschreven: de kopie voor het huidige potje, en de
+// INI-waarde voor alles wat er later uit wordt afgeleid.
+//
+// Een uitzondering is m_useFpsLimit: die wordt wel elke lus opnieuw gelezen,
+// dus "onbeperkt" werkt altijd, ook zonder dat we m_maxFPS hebben gevonden.
 
 static uint32_t g_qolLastCamera = 0xFFFFFFFFu;
 static uint32_t g_qolLastFps = 0xFFFFFFFFu;
@@ -328,53 +338,132 @@ static void* globalData() {
     return ptrOk(p) ? p : nullptr;
 }
 
-// Zet de gewenste waarden, of herstelt het origineel bij nul.
+// Is dit adres nu echt te lezen? De adressen zijn bij het injecteren gemeten
+// en er kan sindsdien een kaart geladen zijn. Een bereikcontrole alleen is
+// hier niet genoeg, want een vrijgegeven pagina ligt in hetzelfde bereik.
+static bool readableAt(const void* p, size_t n) {
+    if (!ptrOk(p)) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(p, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    const DWORD ok = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                     PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                     PAGE_EXECUTE_WRITECOPY;
+    if (!(mbi.Protect & ok)) return false;
+    const uintptr_t endOfRegion = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    return (uintptr_t)p + n <= endOfRegion;
+}
+
+// Het adres van m_maxHeightAboveGround, maar alleen als het blok er nog
+// uitziet als een View. De twee zoomconstanten en de minimale hoogte kosten
+// niets om opnieuw te controleren en sluiten uit dat we ergens anders
+// schrijven dan bedoeld.
+static float* viewMaxHeight(uint32_t i) {
+    if (i >= g_r.viewCount) return nullptr;
+    const float* f = (const float*)g_r.viewAddr[i];
+    if (!readableAt(f, 24)) return nullptr;
+    if (f[0] != 1.3f || f[1] != 0.2f) return nullptr;
+    if (f[3] != g_r.viewMinHeight) return nullptr;
+    return (float*)(g_r.viewAddr[i] + 8);
+}
+
+// Idem voor GameEngine::m_maxFPS, herkend aan de vtable van het object.
+static int32_t* engineMaxFps() {
+    if (!g_r.maxFpsOk || !g_r.maxFpsAddr) return nullptr;
+    const void* inst = (const void*)g_r.engineInstance;
+    if (!readableAt(inst, sizeof(uintptr_t))) return nullptr;
+    if (*(const uintptr_t*)inst != g_r.engineVtable) return nullptr;
+    if (!readableAt((const void*)g_r.maxFpsAddr, 4)) return nullptr;
+    return (int32_t*)g_r.maxFpsAddr;
+}
+
+// Zet de gewenste waarden, of herstelt het origineel bij nul. Draait elke
+// tik, want een nieuwe kaart zet de View-kopie terug.
 static void applyQol() {
     if (!g_shared || !g_r.qolOk) return;
 
     const uint32_t wantCam = g_shared->qolCameraMax;
     const uint32_t wantFps = g_shared->qolFpsLimit;
-    if (wantCam == g_qolLastCamera && wantFps == g_qolLastFps) return;
+    const bool changed = (wantCam != g_qolLastCamera) || (wantFps != g_qolLastFps);
+    const bool unlimited = (wantFps == kFpsUnlimited);
 
-    void* gd = globalData();
-    if (!gd) return;
-    char* base = (char*)gd;
+    char* base = (char*)globalData();
 
-    if (g_r.offMaxCameraHeight) {
-        const float v = wantCam ? (float)wantCam : g_r.origMaxCameraHeight;
-        *(float*)(base + g_r.offMaxCameraHeight) = v;
-        logf("[zp] camerahoogte: %.0f\n", v);
+    // --- camerahoogte ---------------------------------------------------
+    if (base && g_r.offMaxCameraHeight) {
+        float* p = (float*)(base + g_r.offMaxCameraHeight);
+        const float want = wantCam ? (float)wantCam : g_r.origMaxCameraHeight;
+        if (*p != want) *p = want;      // voor een View die nog moet komen
+    }
+    uint32_t viewsWritten = 0;
+    for (uint32_t i = 0; i < g_r.viewCount; ++i) {
+        float* p = viewMaxHeight(i);
+        if (!p) continue;
+        const float want = wantCam ? (float)wantCam : g_r.viewOrigMax[i];
+        if (*p != want) *p = want;
+        ++viewsWritten;
+    }
+    if (changed)
+        logf("[zp] camerahoogte: %.0f (%u camera%s)\n",
+             wantCam ? (double)wantCam : (double)g_r.origMaxCameraHeight,
+             viewsWritten, viewsWritten == 1 ? "" : "'s");
+
+    // --- beeldsnelheid ---------------------------------------------------
+    //
+    // m_useFpsLimit is een Bool, dus een byte. Er vier schrijven zou de vlag
+    // ernaast overschrijven.
+    if (base && g_r.offUseFpsLimit) {
+        uint8_t* p = (uint8_t*)(base + g_r.offUseFpsLimit);
+        const uint8_t want = unlimited ? 0u
+                           : wantFps   ? 1u
+                                       : g_r.origUseFpsLimit;
+        if (*p != want) *p = want;
     }
 
-    if (g_r.offFramesPerSecondLimit) {
-        const int32_t v = wantFps ? (int32_t)wantFps : g_r.origFramesPerSecondLimit;
-        *(int32_t*)(base + g_r.offFramesPerSecondLimit) = v;
-        // De begrenzingslus deelt door deze waarde, dus hem aanzetten met nul
-        // erin zou een eeuwige lus geven. Alleen inschakelen bij een positief
-        // getal.
-        if (g_r.offUseFpsLimit) {
-            const uint32_t on = (v > 0) ? 1u : g_r.origUseFpsLimit;
-            *(uint32_t*)(base + g_r.offUseFpsLimit) = on;
-        }
-        logf("[zp] fps-limiet: %d\n", v);
+    const int32_t fps = (wantFps && !unlimited) ? (int32_t)wantFps
+                                                : g_r.origFramesPerSecondLimit;
+    if (base && g_r.offFramesPerSecondLimit) {
+        int32_t* p = (int32_t*)(base + g_r.offFramesPerSecondLimit);
+        if (*p != fps) *p = fps;
+    }
+
+    int32_t* mf = engineMaxFps();
+    if (mf) {
+        const int32_t want = (wantFps && !unlimited) ? (int32_t)wantFps
+                                                    : g_r.origMaxFps;
+        // De lus rekent 1000/m_maxFPS, dus nul zou delen door nul zijn.
+        if (want > 0 && *mf != want) *mf = want;
+    }
+    if (changed) {
+        if (unlimited)      logf("[zp] fps: onbeperkt\n");
+        else if (!wantFps)  logf("[zp] fps: standaard (%d)\n", g_r.origMaxFps);
+        else if (mf)        logf("[zp] fps-limiet: %d\n", fps);
+        else                logf("[zp] fps-limiet %d niet toe te passen; "
+                                 "kies Standaard of Onbeperkt\n", fps);
     }
 
     g_qolLastCamera = wantCam;
     g_qolLastFps = wantFps;
 }
 
-// Alles terugzetten zoals het spel het had.
 static void restoreQol() {
     if (!g_r.qolOk) return;
-    void* gd = globalData();
-    if (!gd) return;
-    char* base = (char*)gd;
+
+    for (uint32_t i = 0; i < g_r.viewCount; ++i) {
+        float* p = viewMaxHeight(i);
+        if (p) *p = g_r.viewOrigMax[i];
+    }
+    int32_t* mf = engineMaxFps();
+    if (mf && g_r.origMaxFps > 0) *mf = g_r.origMaxFps;
+
+    char* base = (char*)globalData();
+    if (!base) return;
     if (g_r.offMaxCameraHeight)
         *(float*)(base + g_r.offMaxCameraHeight) = g_r.origMaxCameraHeight;
     if (g_r.offFramesPerSecondLimit)
         *(int32_t*)(base + g_r.offFramesPerSecondLimit) = g_r.origFramesPerSecondLimit;
     if (g_r.offUseFpsLimit)
-        *(uint32_t*)(base + g_r.offUseFpsLimit) = g_r.origUseFpsLimit;
+        *(uint8_t*)(base + g_r.offUseFpsLimit) = g_r.origUseFpsLimit;
 }
 
 // ----------------------------------------------------------------- de hook --
@@ -494,6 +583,7 @@ static DWORD WINAPI worker(LPVOID) {
         g_shared->qolOrigCameraMax = (uint32_t)(g_r.origMaxCameraHeight + 0.5f);
         g_shared->qolOrigFpsLimit = (uint32_t)(g_r.origFramesPerSecondLimit < 0
                                                ? 0 : g_r.origFramesPerSecondLimit);
+        g_shared->qolExactFps = g_r.maxFpsOk ? 1u : 0u;
     }
 
     if (g_shared) {

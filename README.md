@@ -31,7 +31,8 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 2 | Getest in de echte game (Generals) | **klaar** |
 | 3 | Compacte GUI met spelherkenning | **klaar** |
 | 3 | Zero Hour: dezelfde DLL, getest in het spel | **klaar** |
-| 4 | Comfortinstellingen (zoom, FPS) via het geheugen | **klaar, ongetest in het spel** |
+| 4 | Comfortinstellingen (zoom, FPS) via het geheugen | **klaar** |
+| 4 | Zoom en FPS naar de kopieen die het spel echt leest | **klaar, ongetest in het spel** |
 
 De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
 die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
@@ -143,8 +144,8 @@ De trainer kan twee dingen bijstellen terwijl het spel draait:
 
 | | Wat | Standaard |
 |---|---|---|
-| **Zoom** | hoe ver je kunt uitzoomen (`MaxCameraHeight`) | 300 |
-| **FPS** | de bovengrens van de beeldsnelheid (`FramesPerSecondLimit`) | 45 |
+| **Zoom** | hoe ver je kunt uitzoomen | 300 |
+| **FPS** | de bovengrens van de beeldsnelheid, of geen grens | 45 |
 
 Beide staan in de GUI, in de uitgeklapte weergave onder **Details**. Ze
 werken direct, zonder herstart, en "Standaard" zet de oorspronkelijke waarde
@@ -154,7 +155,80 @@ De simulatie blijft op 30 Hz lopen. `LOGICFRAMES_PER_SECOND` is een
 compile-time constante en replays zijn lockstep, dus een hogere FPS-limiet
 geeft vloeiender beeld en **geen sneller spel**.
 
-### Waarom dit in het geheugen gebeurt en niet in een INI
+### Waarom de eerste versie niets deed
+
+De eerste geheugenversie schreef `MaxCameraHeight` en
+`FramesPerSecondLimit` in `TheGlobalData` en had in het spel geen enkel
+effect. De broncode laat zien waarom: dat zijn **startwaarden**, en het spel
+kopieert ze eenmalig naar de plek waar hij ze daarna leest.
+
+```cpp
+// View::init()   -- de camera pakt zijn eigen kopie
+m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
+m_minHeightAboveGround = TheGlobalData->m_minCameraHeight;
+
+// GameEngine::init()  -- de begrenzer ook
+setFramesPerSecondLimit( TheGlobalData->m_framesPerSecondLimit );
+```
+
+En dit is waar het spel per frame naar kijkt:
+
+```cpp
+DWORD limit = (1000.0f/m_maxFPS)-1;                       // GameEngine::m_maxFPS
+while (TheGlobalData->m_useFpsLimit && (now - prevTime) < limit)
+    ::Sleep(0);
+```
+
+Twee dingen vallen daarin op. `m_maxFPS` is de kopie, dus die moet je hebben
+om een ander getal af te dwingen. Maar `m_useFpsLimit` wordt **wel** elke lus
+opnieuw gelezen, en dat is precies waarom "Onbeperkt" altijd werkt, ook als
+de kopie niet gevonden wordt.
+
+Nu worden beide plekken geschreven: de kopie voor het potje dat nu draait, en
+de INI-waarde voor elke View en elke reset die daarna nog komt. En omdat een
+nieuwe kaart de kopie terugzet, gebeurt dat elke tik opnieuw in plaats van
+alleen bij het omzetten van de knop.
+
+### De kopieen terugvinden
+
+Geen van beide staat in een veldtabel, dus ze worden op hun vorm herkend.
+
+**De camera.** De zes Reals staan in declaratievolgorde achter elkaar en de
+eerste twee zijn constanten die nergens anders worden geschreven:
+
+```cpp
+m_maxZoom = 1.3f;      // <- acht bytes die nergens anders zo staan
+m_minZoom = 0.2f;
+m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
+m_minHeightAboveGround = TheGlobalData->m_minCameraHeight;   // <- exacte kopie
+```
+
+`1.3f` gevolgd door `0.2f` is de vingerafdruk; dat `m_minHeightAboveGround`
+exact gelijk is aan de waarde uit `TheGlobalData` is de bevestiging. Voor
+elke schrijfactie wordt die vingerafdruk opnieuw gecontroleerd, zodat een
+View die intussen verhuisd of opgeruimd is niet leidt tot schrijven in
+vreemd geheugen.
+
+**De fps-limiet.** `GameEngine` is een kleine klasse met een vaste staart:
+
+```cpp
+class GameEngine : public SubsystemInterface {
+    ...
+    Int  m_maxFPS;
+    Bool m_quitting;
+    Bool m_isActive;
+};
+```
+
+Gezocht wordt dus: een object met een rijke vtable (dertig virtuele functies,
+een toevallig object heeft er zelden meer dan een paar), aangewezen door een
+globale pointer in de data van het image, met daarin de huidige limiet
+gevolgd door twee bytes die zich als bool gedragen en een `m_quitting` die
+nul is. Levert dat **meer dan een** kandidaat op, dan wordt er niets
+geschreven en verdwijnen de getallen uit de keuzelijst; Standaard en
+Onbeperkt blijven dan over.
+
+### Waarom niet via een INI-bestand
 
 De eerste poging was een los `GameData.ini` in `Data\INI\`. Dat liet Zero
 Hour niet meer opstarten. De reden staat in de engine:
@@ -173,7 +247,7 @@ De geheugenroute heeft dat probleem niet: er wordt niets aan de installatie
 veranderd, niets overschreven, en de INI-checksum (`&xferCRC`) blijft intact.
 Sluit je de trainer af met "Standaard" gekozen, dan is er geen spoor.
 
-### Hoe de offsets gevonden worden
+### Hoe de INI-offsets gevonden worden
 
 Niet geraden, en ook niet statistisch. De engine bewaart zijn eigen
 veldoffsets in de binary, in de tabel waarmee hij INI-bestanden parseert:
@@ -208,9 +282,10 @@ image waarvan het doelwit op die offsets een geloofwaardige set waarden heeft
 staan: een minimale camerahoogte onder de maximale, en een FPS-limiet tussen
 0 en 1000.
 
-Eén veiligheidsregel zit hard in de DLL: `UseFPSLimit` wordt alleen
-aangezet als de limiet positief is. De begrenzingslus deelt door die waarde,
-dus aanzetten met een nul erin zou het spel laten hangen.
+Twee veiligheidsregels zitten hard in de DLL. `m_maxFPS` wordt alleen gezet
+op een positief getal, want de begrenzingslus rekent `1000/m_maxFPS` en nul
+zou delen door nul zijn. En `UseFPSLimit` is een `Bool`, dus één byte: er
+vier schrijven zou de vlag ernaast overschrijven.
 
 ## De trainer gebruiken
 

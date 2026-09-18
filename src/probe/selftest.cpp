@@ -99,7 +99,18 @@ enum : uint32_t {
     INI_OFF_MAXCAM    = 0x0120,       // de offsets die we moeten terugvinden
     INI_OFF_MINCAM    = 0x0124,
 
+    INI_OFF_FPS       = 0x0128,
     GLOBALDATA_PTR    = 0x00411800,   // de globale pointer, in schrijfbare data
+
+    // Het spel leest tijdens een potje niet uit GlobalData maar uit kopieen:
+    // de View heeft zijn eigen camerabegrenzing en GameEngine zijn eigen
+    // fps-limiet. Die twee moeten dus ook gevonden worden.
+    ENGINE_PTR        = 0x00411810,
+    ENGINE_OFF_MAXFPS = 0x0008,       // achter vptr en AsciiString m_name
+    ENGINE_DECOY_PTR  = 0x00411818,   // zelfde getal, magere vtable
+    VT_ENGINE         = 0x00409000,   // dertig slots, zoals GameEngine
+    VT_THIN           = 0x00409100,   // te weinig slots om te tellen
+    FAKE_FPS_LIMIT    = 45,
 
     // Naamanker-regressie: een poolnaam in alleen-lezen data, een verwijzing
     // ernaar in "code", en vlakbij een verwijzing naar de body-vtable. Zo
@@ -131,9 +142,9 @@ struct Space {
     void putf(uint32_t addr, float value) {
         memcpy(heapAt(addr), &value, 4);
     }
-    // Legt een vtable van acht slots neer die allemaal naar CODE_ADDR wijzen.
-    uint32_t makeVtable(uint32_t addr) {
-        for (int i = 0; i < 8; ++i) {
+    // Legt een vtable neer waarvan elk slot naar CODE_ADDR wijst.
+    uint32_t makeVtable(uint32_t addr, int slots = 8) {
+        for (int i = 0; i < slots; ++i) {
             uint32_t fn = CODE_ADDR + (uint32_t)i * 0x10;
             memcpy(imgAt(addr) + i * 4, &fn, 4);
         }
@@ -199,7 +210,58 @@ int runSelfTest() {
         uint32_t gd = sp.alloc(0x400);
         sp.putf(gd + INI_OFF_MAXCAM, 300.0f);
         sp.putf(gd + INI_OFF_MINCAM, 100.0f);
+        sp.put(gd + INI_OFF_FPS, FAKE_FPS_LIMIT);
         memcpy(sp.dataAt(GLOBALDATA_PTR), &gd, 4);
+    }
+
+    // De View, met zijn eigen kopie van de camerabegrenzing:
+    //
+    //   Real m_maxZoom, m_minZoom, m_maxHeightAboveGround,
+    //        m_minHeightAboveGround, m_zoom, m_heightAboveGround;
+    //
+    // Plus een lokaas dat dezelfde twee zoomconstanten heeft maar een
+    // minimale hoogte die niet bij GlobalData past. Zonder die controle zou
+    // elk blok met 1.3 en 0.2 erin meetellen.
+    uint32_t viewAddr = 0;
+    {
+        viewAddr = sp.alloc(0x80);
+        sp.putf(viewAddr + 0,  1.3f);
+        sp.putf(viewAddr + 4,  0.2f);
+        sp.putf(viewAddr + 8,  300.0f);
+        sp.putf(viewAddr + 12, 100.0f);
+        sp.putf(viewAddr + 16, 1.1f);
+        sp.putf(viewAddr + 20, 250.0f);
+
+        uint32_t decoy = sp.alloc(0x80);
+        sp.putf(decoy + 0,  1.3f);
+        sp.putf(decoy + 4,  0.2f);
+        sp.putf(decoy + 8,  300.0f);
+        sp.putf(decoy + 12, 77.0f);      // geen kopie van m_minCameraHeight
+        sp.putf(decoy + 16, 1.1f);
+        sp.putf(decoy + 20, 250.0f);
+    }
+
+    // GameEngine, met m_maxFPS achter de vptr en AsciiString m_name, gevolgd
+    // door m_quitting en m_isActive. En een lokaas met hetzelfde getal maar
+    // een vtable van drie slots: te weinig voor een klasse met dertig
+    // virtuele functies.
+    uint32_t engineAddr = 0;
+    {
+        const uint32_t vtEngine = sp.makeVtable(VT_ENGINE, 30);
+        engineAddr = sp.alloc(0x40);
+        sp.put(engineAddr, vtEngine);
+        sp.put(engineAddr + ENGINE_OFF_MAXFPS, FAKE_FPS_LIMIT);
+        *sp.heapAt(engineAddr + ENGINE_OFF_MAXFPS + 4) = 0;   // m_quitting
+        *sp.heapAt(engineAddr + ENGINE_OFF_MAXFPS + 5) = 1;   // m_isActive
+        memcpy(sp.dataAt(ENGINE_PTR), &engineAddr, 4);
+
+        const uint32_t vtThin = sp.makeVtable(VT_THIN, 3);
+        uint32_t decoy = sp.alloc(0x40);
+        sp.put(decoy, vtThin);
+        sp.put(decoy + ENGINE_OFF_MAXFPS, FAKE_FPS_LIMIT);
+        *sp.heapAt(decoy + ENGINE_OFF_MAXFPS + 4) = 0;
+        *sp.heapAt(decoy + ENGINE_OFF_MAXFPS + 5) = 1;
+        memcpy(sp.dataAt(ENGINE_DECOY_PTR), &decoy, 4);
     }
 
     // Spelers: alle zestien slots worden gealloceerd, precies zoals
@@ -423,12 +485,35 @@ int runSelfTest() {
         check("namen niet door elkaar gehaald", offMax != offMin);
 
         GlobalDataHit g;
-        bool found = findGlobalData(t, offMax, offMin, 0, &g);
+        bool found = findGlobalData(t, offMax, offMin, INI_OFF_FPS, &g);
         snprintf(detail, sizeof(detail), "%s",
                  found ? "pointer gevonden" : "niets gevonden");
         check("TheGlobalData via de offsets gevonden",
               found && g.pointerAddr == GLOBALDATA_PTR &&
               g.maxCameraHeight == 300.0f, detail);
+
+        // De kopie in de View is wat er tijdens een potje telt. GlobalData
+        // aanpassen doet niets aan een kaart die al geladen is.
+        std::vector<ViewHit> views = findViews(t, 100.0f, 300.0f);
+        bool viewOk = (views.size() == 1) && views[0].addr == viewAddr &&
+                      views[0].maxHeightAddr == viewAddr + 8 &&
+                      views[0].maxHeight == 300.0f;
+        snprintf(detail, sizeof(detail), "%u kandidaat/kandidaten",
+                 (unsigned)views.size());
+        check("camerabegrenzing in de View gevonden", viewOk, detail);
+        check("lokaas met vreemde minimumhoogte verworpen", views.size() == 1);
+
+        // Idem voor de fps-limiet, die in GameEngine staat en niet in de INI.
+        EngineHit e;
+        bool engineFound = findGameEngine(t, FAKE_FPS_LIMIT, &e);
+        snprintf(detail, sizeof(detail), "+0x%x", e.offMaxFps);
+        check("m_maxFPS in GameEngine gevonden",
+              engineFound && e.instance == engineAddr &&
+              e.offMaxFps == ENGINE_OFF_MAXFPS, detail);
+
+        // De magere vtable is de valstrik: telt die mee, dan zijn er twee
+        // kandidaten en hoort er niets geschreven te worden.
+        check("lokaas met magere vtable verworpen", engineFound);
     }
 
     // --- klasse op naam aanwijzen -----------------------------------------

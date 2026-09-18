@@ -77,7 +77,27 @@ struct Resolved {
     // Oorspronkelijke waarden, zodat we ze kunnen terugzetten.
     float    origMaxCameraHeight = 0;
     int32_t  origFramesPerSecondLimit = 0;
-    uint32_t origUseFpsLimit = 0;
+    uint8_t  origUseFpsLimit = 0;       // Bool, dus een byte
+
+    // De View-kopieen van de camerabegrenzing. GlobalData aanpassen werkt
+    // alleen voor een View die nog gemaakt moet worden; een geladen kaart
+    // heeft zijn kopie al. Daarom allebei.
+    //
+    // Het adres wordt bewaard, niet de waarde: voor elke schrijfactie wordt
+    // de vingerafdruk opnieuw gecontroleerd, zodat een verhuisde of
+    // opgeruimde View niet leidt tot schrijven in vreemd geheugen.
+    static const uint32_t kMaxViews = 8;
+    uint32_t viewCount = 0;
+    uintptr_t viewAddr[kMaxViews] = {0};   // adres van m_maxZoom
+    float     viewOrigMax[kMaxViews] = {0};
+    float     viewMinHeight = 0;           // == m_minCameraHeight
+
+    // GameEngine::m_maxFPS, de kopie waar de begrenzingslus echt op kijkt.
+    bool      maxFpsOk = false;
+    uintptr_t engineInstance = 0;
+    uintptr_t maxFpsAddr = 0;
+    uintptr_t engineVtable = 0;            // om het adres te hervalideren
+    int32_t   origMaxFps = 0;
 
     // Onderbouwing, zodat het log laat zien hoe hard het bewijs is.
     uint32_t healthConfirmations = 0;

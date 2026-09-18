@@ -311,12 +311,49 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
                 r.origMaxCameraHeight = g.maxCameraHeight;
                 r.origFramesPerSecondLimit = g.framesPerSecondLimit;
                 if (offUse) {
-                    uint32_t v = 0;
-                    if (t.r32(g.instance + offUse, v)) r.origUseFpsLimit = v;
+                    // Bool is een byte. Er vier schrijven zou de vlag ernaast
+                    // meenemen, dus lezen we er ook maar een.
+                    uint8_t v = 0;
+                    if (t.r8(g.instance + offUse, v)) r.origUseFpsLimit = v;
                 }
                 say("comfort: TheGlobalData via 0x%llx, camera max %.0f, "
                     "fps-limiet %d\n", (unsigned long long)g.pointerAddr,
                     g.maxCameraHeight, g.framesPerSecondLimit);
+
+                // De View heeft zijn eigen kopie van de camerabegrenzing en
+                // die is wat er tijdens het spelen telt.
+                r.viewMinHeight = g.minCameraHeight;
+                std::vector<ViewHit> views =
+                    findViews(t, g.minCameraHeight, g.maxCameraHeight);
+                for (const ViewHit& v : views) {
+                    if (r.viewCount >= Resolved::kMaxViews) break;
+                    r.viewAddr[r.viewCount] = (uintptr_t)v.addr;
+                    r.viewOrigMax[r.viewCount] = v.maxHeight;
+                    ++r.viewCount;
+                }
+                if (r.viewCount)
+                    say("comfort: %u camera(s) gevonden, hoogte nu %.0f\n",
+                        r.viewCount, views[0].maxHeight);
+                else
+                    say("comfort: geen camera gevonden; zoom werkt pas bij de "
+                        "volgende kaart\n");
+
+                // De fps-begrenzer leest een kopie in GameEngine, niet de
+                // INI-waarde. Zonder die kopie blijft alleen aan/uit over.
+                EngineHit e;
+                if (findGameEngine(t, g.framesPerSecondLimit, &e)) {
+                    r.maxFpsOk = true;
+                    r.engineInstance = (uintptr_t)e.instance;
+                    r.maxFpsAddr = (uintptr_t)(e.instance + e.offMaxFps);
+                    r.engineVtable = (uintptr_t)e.vtable;
+                    r.origMaxFps = g.framesPerSecondLimit;
+                    say("comfort: TheGameEngine 0x%llx, m_maxFPS +0x%x = %d\n",
+                        (unsigned long long)e.instance, e.offMaxFps,
+                        g.framesPerSecondLimit);
+                } else {
+                    say("comfort: m_maxFPS niet eenduidig; alleen Standaard en "
+                        "Onbeperkt werken\n");
+                }
             } else {
                 say("comfort: TheGlobalData niet gevonden; knoppen blijven uit\n");
             }
