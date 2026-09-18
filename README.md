@@ -30,7 +30,7 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 2 | `zp-inject.exe` + F10-toggle | **klaar** |
 | 2 | Getest in de echte game (Generals) | **klaar** |
 | 3 | Compacte GUI met spelherkenning | **klaar** |
-| 3 | Zero Hour | wacht op een probe-run |
+| 3 | Zero Hour: probe-run schoon, dezelfde DLL | **klaar** |
 
 De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
 die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
@@ -173,8 +173,18 @@ F12   hook verwijderen
 
 ### Werkt dit ook op Zero Hour?
 
-Waarschijnlijk zonder aanpassing. Zero Hour deelt elk anker waar de trainer
-op steunt, nagelopen in de `GeneralsMD/`-tree van de EA-broncode:
+Ja, met dezelfde DLL. Een probe-run op Zero Hour
+(`sha256 420fba1d...`, image 6 MB) loste alles op, en de hexdump bevestigt
+de structuur byte voor byte: vier vptrs op `0x00 / 0x04 / 0x10 / 0x14`,
+`m_object` op `0x0c`, en de hitpoints direct achter `m_damageScalar`. Precies
+zoals in Generals, alleen op andere adressen.
+
+Ook de gemeten `DamageInfo` klopte: `sizeof(DamageInfoInput)` kwam uit op
+`0x40`. De doorslag gaf een `0x0b` op de plek van `m_damageFXOverride`, want
+de broncode zet dat veld standaard op `DAMAGE_UNRESISTABLE` (11).
+
+Zero Hour deelt elk anker waar de trainer op steunt, nagelopen in de
+`GeneralsMD/`-tree van de EA-broncode:
 
 | | Generals | Zero Hour |
 |---|---|---|
