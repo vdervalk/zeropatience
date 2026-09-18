@@ -102,15 +102,12 @@ enum : uint32_t {
     INI_OFF_FPS       = 0x0128,
     GLOBALDATA_PTR    = 0x00411800,   // de globale pointer, in schrijfbare data
 
-    // Het spel leest tijdens een potje niet uit GlobalData maar uit kopieen:
-    // de View heeft zijn eigen camerabegrenzing en GameEngine zijn eigen
-    // fps-limiet. Die twee moeten dus ook gevonden worden.
-    ENGINE_PTR        = 0x00411810,
-    ENGINE_OFF_MAXFPS = 0x0008,       // achter vptr en AsciiString m_name
-    ENGINE_DECOY_PTR  = 0x00411818,   // zelfde getal, magere vtable
-    VT_ENGINE         = 0x00409000,   // dertig slots, zoals GameEngine
-    VT_THIN           = 0x00409100,   // te weinig slots om te tellen
-    FAKE_FPS_LIMIT    = 45,
+    // Het spel leest tijdens een potje niet uit GlobalData maar uit de kopie
+    // in de View. Die wordt gezocht vanaf de globale pointer.
+    VIEW_PTR          = 0x00411810,   // "TheTacticalView", in schrijfbare data
+    VIEW_DECOY_PTR    = 0x00411818,   // zelfde vorm, verkeerde minimumhoogte
+    VIEW_BLOCK_OFF    = 0x0030,       // m_maxZoom binnen het object
+    VT_VIEW           = 0x00409000,
 
     // Naamanker-regressie: een poolnaam in alleen-lezen data, een verwijzing
     // ernaar in "code", en vlakbij een verwijzing naar de body-vtable. Zo
@@ -210,7 +207,7 @@ int runSelfTest() {
         uint32_t gd = sp.alloc(0x400);
         sp.putf(gd + INI_OFF_MAXCAM, 300.0f);
         sp.putf(gd + INI_OFF_MINCAM, 100.0f);
-        sp.put(gd + INI_OFF_FPS, FAKE_FPS_LIMIT);
+        sp.put(gd + INI_OFF_FPS, 45);
         memcpy(sp.dataAt(GLOBALDATA_PTR), &gd, 4);
     }
 
@@ -219,49 +216,35 @@ int runSelfTest() {
     //   Real m_maxZoom, m_minZoom, m_maxHeightAboveGround,
     //        m_minHeightAboveGround, m_zoom, m_heightAboveGround;
     //
-    // Plus een lokaas dat dezelfde twee zoomconstanten heeft maar een
-    // minimale hoogte die niet bij GlobalData past. Zonder die controle zou
-    // elk blok met 1.3 en 0.2 erin meetellen.
+    // Twee valstrikken. De eerste is een blok met dezelfde zoomconstanten dat
+    // door GEEN globale pointer wordt aangewezen: precies wat vrijgegeven
+    // geheugen oplevert, want dat houdt zijn oude inhoud. De tweede staat wel
+    // achter een pointer maar heeft een minimumhoogte die niet bij GlobalData
+    // hoort.
     uint32_t viewAddr = 0;
     {
-        viewAddr = sp.alloc(0x80);
-        sp.putf(viewAddr + 0,  1.3f);
-        sp.putf(viewAddr + 4,  0.2f);
-        sp.putf(viewAddr + 8,  300.0f);
-        sp.putf(viewAddr + 12, 100.0f);
-        sp.putf(viewAddr + 16, 1.1f);
-        sp.putf(viewAddr + 20, 250.0f);
+        const uint32_t vtView = sp.makeVtable(VT_VIEW, 20);
 
-        uint32_t decoy = sp.alloc(0x80);
-        sp.putf(decoy + 0,  1.3f);
-        sp.putf(decoy + 4,  0.2f);
-        sp.putf(decoy + 8,  300.0f);
-        sp.putf(decoy + 12, 77.0f);      // geen kopie van m_minCameraHeight
-        sp.putf(decoy + 16, 1.1f);
-        sp.putf(decoy + 20, 250.0f);
-    }
+        auto layView = [&](uint32_t obj, float minH) {
+            sp.put(obj, vtView);
+            sp.putf(obj + VIEW_BLOCK_OFF + 0,  1.3f);
+            sp.putf(obj + VIEW_BLOCK_OFF + 4,  0.2f);
+            sp.putf(obj + VIEW_BLOCK_OFF + 8,  300.0f);
+            sp.putf(obj + VIEW_BLOCK_OFF + 12, minH);
+            sp.putf(obj + VIEW_BLOCK_OFF + 16, 1.1f);
+            sp.putf(obj + VIEW_BLOCK_OFF + 20, 250.0f);
+        };
 
-    // GameEngine, met m_maxFPS achter de vptr en AsciiString m_name, gevolgd
-    // door m_quitting en m_isActive. En een lokaas met hetzelfde getal maar
-    // een vtable van drie slots: te weinig voor een klasse met dertig
-    // virtuele functies.
-    uint32_t engineAddr = 0;
-    {
-        const uint32_t vtEngine = sp.makeVtable(VT_ENGINE, 30);
-        engineAddr = sp.alloc(0x40);
-        sp.put(engineAddr, vtEngine);
-        sp.put(engineAddr + ENGINE_OFF_MAXFPS, FAKE_FPS_LIMIT);
-        *sp.heapAt(engineAddr + ENGINE_OFF_MAXFPS + 4) = 0;   // m_quitting
-        *sp.heapAt(engineAddr + ENGINE_OFF_MAXFPS + 5) = 1;   // m_isActive
-        memcpy(sp.dataAt(ENGINE_PTR), &engineAddr, 4);
+        viewAddr = sp.alloc(0x100);
+        layView(viewAddr, 100.0f);
+        memcpy(sp.dataAt(VIEW_PTR), &viewAddr, 4);
 
-        const uint32_t vtThin = sp.makeVtable(VT_THIN, 3);
-        uint32_t decoy = sp.alloc(0x40);
-        sp.put(decoy, vtThin);
-        sp.put(decoy + ENGINE_OFF_MAXFPS, FAKE_FPS_LIMIT);
-        *sp.heapAt(decoy + ENGINE_OFF_MAXFPS + 4) = 0;
-        *sp.heapAt(decoy + ENGINE_OFF_MAXFPS + 5) = 1;
-        memcpy(sp.dataAt(ENGINE_DECOY_PTR), &decoy, 4);
+        uint32_t loose = sp.alloc(0x100);   // niet aangewezen
+        layView(loose, 100.0f);
+
+        uint32_t decoy = sp.alloc(0x100);
+        layView(decoy, 77.0f);              // geen kopie van m_minCameraHeight
+        memcpy(sp.dataAt(VIEW_DECOY_PTR), &decoy, 4);
     }
 
     // Spelers: alle zestien slots worden gealloceerd, precies zoals
@@ -495,25 +478,18 @@ int runSelfTest() {
         // De kopie in de View is wat er tijdens een potje telt. GlobalData
         // aanpassen doet niets aan een kaart die al geladen is.
         std::vector<ViewHit> views = findViews(t, 100.0f, 300.0f);
-        bool viewOk = (views.size() == 1) && views[0].addr == viewAddr &&
-                      views[0].maxHeightAddr == viewAddr + 8 &&
+        bool viewOk = (views.size() == 1) &&
+                      views[0].globalAddr == VIEW_PTR &&
+                      views[0].instance == viewAddr &&
+                      views[0].blockOffset == VIEW_BLOCK_OFF &&
                       views[0].maxHeight == 300.0f;
-        snprintf(detail, sizeof(detail), "%u kandidaat/kandidaten",
+        snprintf(detail, sizeof(detail), "%u kandidaat/kandidaten via .data",
                  (unsigned)views.size());
-        check("camerabegrenzing in de View gevonden", viewOk, detail);
-        check("lokaas met vreemde minimumhoogte verworpen", views.size() == 1);
+        check("camerabegrenzing via de globale pointer", viewOk, detail);
 
-        // Idem voor de fps-limiet, die in GameEngine staat en niet in de INI.
-        EngineHit e;
-        bool engineFound = findGameEngine(t, FAKE_FPS_LIMIT, &e);
-        snprintf(detail, sizeof(detail), "+0x%x", e.offMaxFps);
-        check("m_maxFPS in GameEngine gevonden",
-              engineFound && e.instance == engineAddr &&
-              e.offMaxFps == ENGINE_OFF_MAXFPS, detail);
-
-        // De magere vtable is de valstrik: telt die mee, dan zijn er twee
-        // kandidaten en hoort er niets geschreven te worden.
-        check("lokaas met magere vtable verworpen", engineFound);
+        // Het losse blok met dezelfde constanten mag niet meetellen: dat is
+        // wat vrijgegeven geheugen oplevert.
+        check("blok zonder globale pointer genegeerd", views.size() == 1);
     }
 
     // --- klasse op naam aanwijzen -----------------------------------------

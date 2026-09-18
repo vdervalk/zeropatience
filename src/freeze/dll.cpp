@@ -354,27 +354,27 @@ static bool readableAt(const void* p, size_t n) {
     return (uintptr_t)p + n <= endOfRegion;
 }
 
-// Het adres van m_maxHeightAboveGround, maar alleen als het blok er nog
-// uitziet als een View. De twee zoomconstanten en de minimale hoogte kosten
-// niets om opnieuw te controleren en sluiten uit dat we ergens anders
-// schrijven dan bedoeld.
+// Het adres van m_maxHeightAboveGround, elke keer opnieuw afgeleid vanaf de
+// globale pointer. Nooit een onthouden heap-adres: vrijgegeven geheugen
+// houdt zijn oude inhoud, dus een vingerafdruk kan blijven kloppen terwijl
+// het blok allang van iets anders is.
 static float* viewMaxHeight(uint32_t i) {
-    if (i >= g_r.viewCount) return nullptr;
-    const float* f = (const float*)g_r.viewAddr[i];
+    if (i >= g_r.viewCount || !g_r.viewGlobal[i]) return nullptr;
+
+    if (!readableAt((const void*)g_r.viewGlobal[i], sizeof(void*))) return nullptr;
+    const char* obj = *(const char* const*)g_r.viewGlobal[i];
+    if (!ptrOk(obj)) return nullptr;
+
+    // Dezelfde klasse als bij het injecteren? Een View die opnieuw is
+    // aangemaakt heeft dezelfde vtable; iets anders heeft dat niet.
+    if (!readableAt(obj, sizeof(uintptr_t))) return nullptr;
+    if (*(const uintptr_t*)obj != g_r.viewVtable[i]) return nullptr;
+
+    const float* f = (const float*)(obj + g_r.viewBlockOffset[i]);
     if (!readableAt(f, 24)) return nullptr;
     if (f[0] != 1.3f || f[1] != 0.2f) return nullptr;
     if (f[3] != g_r.viewMinHeight) return nullptr;
-    return (float*)(g_r.viewAddr[i] + 8);
-}
-
-// Idem voor GameEngine::m_maxFPS, herkend aan de vtable van het object.
-static int32_t* engineMaxFps() {
-    if (!g_r.maxFpsOk || !g_r.maxFpsAddr) return nullptr;
-    const void* inst = (const void*)g_r.engineInstance;
-    if (!readableAt(inst, sizeof(uintptr_t))) return nullptr;
-    if (*(const uintptr_t*)inst != g_r.engineVtable) return nullptr;
-    if (!readableAt((const void*)g_r.maxFpsAddr, 4)) return nullptr;
-    return (int32_t*)g_r.maxFpsAddr;
+    return (float*)(f + 2);
 }
 
 // Zet de gewenste waarden, of herstelt het origineel bij nul. Draait elke
@@ -420,27 +420,8 @@ static void applyQol() {
         if (*p != want) *p = want;
     }
 
-    const int32_t fps = (wantFps && !unlimited) ? (int32_t)wantFps
-                                                : g_r.origFramesPerSecondLimit;
-    if (base && g_r.offFramesPerSecondLimit) {
-        int32_t* p = (int32_t*)(base + g_r.offFramesPerSecondLimit);
-        if (*p != fps) *p = fps;
-    }
-
-    int32_t* mf = engineMaxFps();
-    if (mf) {
-        const int32_t want = (wantFps && !unlimited) ? (int32_t)wantFps
-                                                    : g_r.origMaxFps;
-        // De lus rekent 1000/m_maxFPS, dus nul zou delen door nul zijn.
-        if (want > 0 && *mf != want) *mf = want;
-    }
-    if (changed) {
-        if (unlimited)      logf("[zp] fps: onbeperkt\n");
-        else if (!wantFps)  logf("[zp] fps: standaard (%d)\n", g_r.origMaxFps);
-        else if (mf)        logf("[zp] fps-limiet: %d\n", fps);
-        else                logf("[zp] fps-limiet %d niet toe te passen; "
-                                 "kies Standaard of Onbeperkt\n", fps);
-    }
+    if (changed)
+        logf("[zp] fps-begrenzing: %s\n", unlimited ? "uit" : "aan");
 
     g_qolLastCamera = wantCam;
     g_qolLastFps = wantFps;
@@ -453,9 +434,6 @@ static void restoreQol() {
         float* p = viewMaxHeight(i);
         if (p) *p = g_r.viewOrigMax[i];
     }
-    int32_t* mf = engineMaxFps();
-    if (mf && g_r.origMaxFps > 0) *mf = g_r.origMaxFps;
-
     char* base = (char*)globalData();
     if (!base) return;
     if (g_r.offMaxCameraHeight)
@@ -583,7 +561,6 @@ static DWORD WINAPI worker(LPVOID) {
         g_shared->qolOrigCameraMax = (uint32_t)(g_r.origMaxCameraHeight + 0.5f);
         g_shared->qolOrigFpsLimit = (uint32_t)(g_r.origFramesPerSecondLimit < 0
                                                ? 0 : g_r.origFramesPerSecondLimit);
-        g_shared->qolExactFps = g_r.maxFpsOk ? 1u : 0u;
     }
 
     if (g_shared) {

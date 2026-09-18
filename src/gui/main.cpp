@@ -75,13 +75,13 @@ static const int kCameraCount = (int)(sizeof(kCameraChoices) / sizeof(kCameraCho
 
 // De simulatie blijft op 30 Hz; dit maakt alleen het beeld vloeiender.
 //
-// "Onbeperkt" staat er apart in omdat het over een andere vlag loopt dan de
-// getallen. De begrenzingslus leest m_useFpsLimit elke keer opnieuw, maar het
-// getal zelf staat in een kopie binnen GameEngine. Uitzetten kan dus altijd,
-// een ander getal alleen als die kopie gevonden is.
+// Alleen aan of uit, geen getallen. Een eigen limiet afdwingen vereist
+// GameEngine::m_maxFPS, en dat object is alleen op zijn vorm te herkennen.
+// Dat bleek te mager: een build die daarin schreef liet het spel crashen.
+// m_useFpsLimit wordt wel elke lus opnieuw gelezen en de offset komt uit de
+// veldtabel van het spel zelf.
 static const Choice kFpsChoices[] = {
-    {L"Standaard", 0}, {L"60", 60}, {L"90", 90}, {L"120", 120}, {L"144", 144},
-    {L"Onbeperkt", kFpsUnlimited},
+    {L"Standaard", 0}, {L"Onbeperkt", kFpsUnlimited},
 };
 static const int kFpsCount = (int)(sizeof(kFpsChoices) / sizeof(kFpsChoices[0]));
 
@@ -125,23 +125,26 @@ static std::wstring gameLabelFor(DWORD pid, const std::string& procName) {
 
 static std::string iniPath() { return pathNextToExe("zeropatience.ini"); }
 
+// Alleen de sneltoets wordt onthouden. De comfortinstellingen bewust niet:
+// die grijpen in het geheugen van het spel in, en een onthouden waarde zou
+// bij het koppelen meteen worden toegepast zonder dat je erom vroeg. Na een
+// crash wil je dat je niets doet tenzij je er nu voor kiest.
 static void loadSettings() {
     g_hotkeyVk = (uint32_t)GetPrivateProfileIntA("trainer", "hotkey", VK_F9,
                                                  iniPath().c_str());
-    g_cameraMax = (uint32_t)GetPrivateProfileIntA("trainer", "cameramax", 0,
-                                                  iniPath().c_str());
-    g_fpsLimit = (uint32_t)GetPrivateProfileIntA("trainer", "fpslimit", 0,
-                                                 iniPath().c_str());
+    g_cameraMax = 0;
+    g_fpsLimit = 0;
 }
 
 static void saveSettings() {
     char buf[32];
     snprintf(buf, sizeof(buf), "%u", g_hotkeyVk);
     WritePrivateProfileStringA("trainer", "hotkey", buf, iniPath().c_str());
-    snprintf(buf, sizeof(buf), "%u", g_cameraMax);
-    WritePrivateProfileStringA("trainer", "cameramax", buf, iniPath().c_str());
-    snprintf(buf, sizeof(buf), "%u", g_fpsLimit);
-    WritePrivateProfileStringA("trainer", "fpslimit", buf, iniPath().c_str());
+
+    // Oude sleutels opruimen, zodat een bestaande zeropatience.ini niet
+    // alsnog een waarde meebrengt.
+    WritePrivateProfileStringA("trainer", "cameramax", nullptr, iniPath().c_str());
+    WritePrivateProfileStringA("trainer", "fpslimit", nullptr, iniPath().c_str());
 }
 
 // -------------------------------------------------------- gedeeld geheugen --
@@ -315,28 +318,6 @@ static void refresh() {
     EnableWindow(g_cbFps, qol);
     EnableWindow(g_lblQol, qol);
 
-    // Een exacte limiet vereist GameEngine::m_maxFPS. Ontbreekt die, dan
-    // blijven Standaard en Onbeperkt over en zeggen we dat een keer, in
-    // plaats van keuzes aan te bieden die niets doen.
-    static bool warnedFps = false;
-    if (qol && !g_shared->qolExactFps && !warnedFps) {
-        warnedFps = true;
-        for (int i = 0; i < kFpsCount; ++i) {
-            if (kFpsChoices[i].value == 0 || kFpsChoices[i].value == kFpsUnlimited)
-                continue;
-            SendMessageW(g_cbFps, CB_DELETESTRING, (WPARAM)i, 0);
-            --i;
-        }
-        if (g_fpsLimit != 0 && g_fpsLimit != kFpsUnlimited) {
-            g_fpsLimit = 0;
-            g_shared->qolFpsLimit = 0;
-        }
-        int sel = 0;
-        for (int i = 0; i < (int)SendMessageW(g_cbFps, CB_GETCOUNT, 0, 0); ++i)
-            if ((uint32_t)SendMessageW(g_cbFps, CB_GETITEMDATA, (WPARAM)i, 0) == g_fpsLimit)
-                sel = i;
-        SendMessageW(g_cbFps, CB_SETCURSEL, sel, 0);
-    }
 
     // Bij een fout klapt het venster eenmalig uit: dan wil je het log zien.
     if (connected && state == STATE_FAILED && !g_autoExpanded && !g_expanded) {

@@ -327,33 +327,18 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
                     findViews(t, g.minCameraHeight, g.maxCameraHeight);
                 for (const ViewHit& v : views) {
                     if (r.viewCount >= Resolved::kMaxViews) break;
-                    r.viewAddr[r.viewCount] = (uintptr_t)v.addr;
+                    r.viewGlobal[r.viewCount] = (uintptr_t)v.globalAddr;
+                    r.viewVtable[r.viewCount] = (uintptr_t)v.vtable;
+                    r.viewBlockOffset[r.viewCount] = v.blockOffset;
                     r.viewOrigMax[r.viewCount] = v.maxHeight;
                     ++r.viewCount;
                 }
                 if (r.viewCount)
-                    say("comfort: %u camera(s) gevonden, hoogte nu %.0f\n",
-                        r.viewCount, views[0].maxHeight);
+                    say("comfort: %u camera(s) via een globale pointer, "
+                        "hoogte nu %.0f\n", r.viewCount, views[0].maxHeight);
                 else
                     say("comfort: geen camera gevonden; zoom werkt pas bij de "
                         "volgende kaart\n");
-
-                // De fps-begrenzer leest een kopie in GameEngine, niet de
-                // INI-waarde. Zonder die kopie blijft alleen aan/uit over.
-                EngineHit e;
-                if (findGameEngine(t, g.framesPerSecondLimit, &e)) {
-                    r.maxFpsOk = true;
-                    r.engineInstance = (uintptr_t)e.instance;
-                    r.maxFpsAddr = (uintptr_t)(e.instance + e.offMaxFps);
-                    r.engineVtable = (uintptr_t)e.vtable;
-                    r.origMaxFps = g.framesPerSecondLimit;
-                    say("comfort: TheGameEngine 0x%llx, m_maxFPS +0x%x = %d\n",
-                        (unsigned long long)e.instance, e.offMaxFps,
-                        g.framesPerSecondLimit);
-                } else {
-                    say("comfort: m_maxFPS niet eenduidig; alleen Standaard en "
-                        "Onbeperkt werken\n");
-                }
             } else {
                 say("comfort: TheGlobalData niet gevonden; knoppen blijven uit\n");
             }

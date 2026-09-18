@@ -269,16 +269,25 @@ bool findGlobalData(const Target& t, uint32_t offMaxCam, uint32_t offMinCam,
 //   m_minHeightAboveGround = TheGlobalData->m_minCameraHeight;
 //
 // en daarna klemt setHeightAboveGround() op die kopie. GlobalData aanpassen
-// terwijl er al een kaart geladen is doet dus niets, en dat is precies wat
-// er in het spel gebeurde.
+// terwijl er al een kaart geladen is doet dus niets.
 //
-// Die vier Reals staan in declaratievolgorde achter elkaar, en de eerste
-// twee zijn constanten die nergens anders worden geschreven. 1.3f gevolgd
-// door 0.2f is daarmee een exacte acht-byte vingerafdruk; de rest van het
-// blok bevestigt hem.
+// Gezocht wordt vanaf de globale pointer, niet vanaf het patroon. Dat is het
+// verschil tussen "ergens in het geheugen staat 1.3 naast 0.2" en "de engine
+// wijst hier zelf zijn View aan". Een adres op de heap onthouden en daar
+// blijven schrijven is bovendien onveilig: vrijgegeven geheugen houdt zijn
+// oude inhoud, dus een vingerafdruk kan blijven kloppen terwijl het blok
+// allang van iets anders is.
+//
+//   View *TheTacticalView = NULL;        // in de data van het image
+//
+// Van daaruit wordt binnen het object het blok van zes Reals gezocht. De
+// eerste twee zijn constanten die nergens anders worden geschreven, en
+// m_minHeightAboveGround moet exact gelijk zijn aan m_minCameraHeight.
 struct ViewHit {
-    uint64_t addr = 0;          // adres van m_maxZoom, begin van het blok
-    uint64_t maxHeightAddr = 0; // +8, waar geschreven moet worden
+    uint64_t globalAddr = 0;    // waar de pointer naar de View staat
+    uint64_t instance = 0;      // de View zelf
+    uint64_t vtable = 0;
+    uint32_t blockOffset = 0;   // van het object tot m_maxZoom
     float    maxHeight = 0;
     float    minHeight = 0;
     float    zoom = 0;
@@ -286,35 +295,6 @@ struct ViewHit {
 };
 std::vector<ViewHit> findViews(const Target& t, float minCameraHeight,
                                float maxCameraHeight);
-
-// --- GameEngine::m_maxFPS ----------------------------------------------
-//
-// De begrenzingslus leest niet de INI-waarde maar een kopie in GameEngine:
-//
-//   DWORD limit = (1000.0f/m_maxFPS)-1;
-//   while (TheGlobalData->m_useFpsLimit && (now - prevTime) < limit) ...
-//
-// m_maxFPS wordt eenmalig gezet in GameEngine::init(). m_useFpsLimit wordt
-// wel elke lus opnieuw gelezen; dat is het verschil tussen "uitzetten" (kan
-// altijd) en "een ander getal" (moet hier langs).
-//
-// De klasse is klein en de vorm ligt vast:
-//
-//   class GameEngine : public SubsystemInterface { ... Int m_maxFPS;
-//                                                      Bool m_quitting;
-//                                                      Bool m_isActive; };
-//
-// Dus: een object met een rijke vtable, aangewezen door een globale pointer
-// in de data van het image, met de huidige limiet gevolgd door twee bytes
-// die zich als bool gedragen en een m_quitting die nul is. Levert dat meer
-// dan een kandidaat op, dan schrijven we niets.
-struct EngineHit {
-    uint64_t pointerAddr = 0;   // TheGameEngine
-    uint64_t instance = 0;
-    uint64_t vtable = 0;
-    uint32_t offMaxFps = 0;
-};
-bool findGameEngine(const Target& t, int32_t fpsLimit, EngineHit* out);
 
 // Volledig vtable-histogram als map, zodat instantietellingen elders
 // opzoekbaar zijn zonder opnieuw te scannen.

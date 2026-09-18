@@ -32,7 +32,8 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 3 | Compacte GUI met spelherkenning | **klaar** |
 | 3 | Zero Hour: dezelfde DLL, getest in het spel | **klaar** |
 | 4 | Comfortinstellingen (zoom, FPS) via het geheugen | **klaar** |
-| 4 | Zoom en FPS naar de kopieen die het spel echt leest | **klaar, ongetest in het spel** |
+| 4 | Zoom naar de View, verankerd op de globale pointer | **klaar, ongetest in het spel** |
+| 4 | FPS-begrenzing aan/uit; eigen getal afdwingen geschrapt | **klaar, ongetest in het spel** |
 
 De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
 die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
@@ -140,93 +141,78 @@ code-patches, geen injectie. Alleen lezen.
 
 ## Comfortinstellingen
 
-De trainer kan twee dingen bijstellen terwijl het spel draait:
-
 | | Wat | Standaard |
 |---|---|---|
 | **Zoom** | hoe ver je kunt uitzoomen | 300 |
-| **FPS** | de bovengrens van de beeldsnelheid, of geen grens | 45 |
+| **FPS** | de beeldsnelheidsbegrenzing aan of uit | aan (45) |
 
-Beide staan in de GUI, in de uitgeklapte weergave onder **Details**. Ze
-werken direct, zonder herstart, en "Standaard" zet de oorspronkelijke waarde
-terug. De keuze wordt onthouden in `zeropatience.ini` naast de trainer.
+Beide staan onder **Details**. Ze worden **niet onthouden** tussen sessies:
+bij het starten staat alles op Standaard en er wordt niets in het spel
+geschreven tenzij je nu iets kiest. Dat is opzet, zie hieronder.
 
 De simulatie blijft op 30 Hz lopen. `LOGICFRAMES_PER_SECOND` is een
-compile-time constante en replays zijn lockstep, dus een hogere FPS-limiet
+compile-time constante en replays zijn lockstep, dus de begrenzing uitzetten
 geeft vloeiender beeld en **geen sneller spel**.
 
-### Waarom de eerste versie niets deed
+### Twee versies die het fout deden
 
-De eerste geheugenversie schreef `MaxCameraHeight` en
-`FramesPerSecondLimit` in `TheGlobalData` en had in het spel geen enkel
-effect. De broncode laat zien waarom: dat zijn **startwaarden**, en het spel
-kopieert ze eenmalig naar de plek waar hij ze daarna leest.
+Dit onderdeel heeft twee keer schade aangericht, en allebei de keren om een
+reden die achteraf in de broncode te lezen was.
+
+**Een los `GameData.ini`** liet Zero Hour niet meer opstarten. Dat bestand
+bestaat al binnen het `.big`-archief; een los bestand met die naam wint
+daarvan en gooit de rest weg. Uitgewerkt onder
+[Waarom niet via een INI-bestand](#waarom-niet-via-een-ini-bestand).
+
+**Schrijven in `TheGlobalData`** deed daarna niets, want dat zijn
+startwaarden. Het spel kopieert ze eenmalig:
 
 ```cpp
-// View::init()   -- de camera pakt zijn eigen kopie
-m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
-m_minHeightAboveGround = TheGlobalData->m_minCameraHeight;
-
-// GameEngine::init()  -- de begrenzer ook
-setFramesPerSecondLimit( TheGlobalData->m_framesPerSecondLimit );
+View::init()          m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
+GameEngine::init()    setFramesPerSecondLimit( TheGlobalData->m_framesPerSecondLimit );
 ```
 
-En dit is waar het spel per frame naar kijkt:
+De versie die daarop volgde schreef wel in die kopieen, en liet het spel
+crashen. Daar zaten twee fouten in:
+
+1. **`GameEngine::m_maxFPS` werd alleen op zijn vorm herkend**: een object
+   met een rijke vtable waarin toevallig het huidige getal stond, gevolgd
+   door twee bytes die zich als bool gedragen. Dat is geen identificatie,
+   dat is een gok met een schrijfactie erachter. Die functie is verwijderd
+   en de getallen zijn uit de keuzelijst gehaald; er is nu alleen nog aan of
+   uit, en dat loopt over `m_useFpsLimit`, waarvan de offset wel uit de
+   veldtabel van het spel komt.
+
+2. **Het adres van de View werd onthouden.** Vrijgegeven geheugen houdt zijn
+   oude inhoud, dus een vingerafdruk kan blijven kloppen terwijl het blok
+   allang van iets anders is. Elke tik opnieuw in zo'n blok schrijven is dan
+   een kwestie van tijd.
+
+### Hoe de camera nu wordt aangewezen
+
+Vanaf de globale pointer naar binnen, niet vanaf een patroon naar buiten:
 
 ```cpp
-DWORD limit = (1000.0f/m_maxFPS)-1;                       // GameEngine::m_maxFPS
-while (TheGlobalData->m_useFpsLimit && (now - prevTime) < limit)
-    ::Sleep(0);
+View *TheTacticalView = NULL;        // een globale pointer, in .data
 ```
 
-Twee dingen vallen daarin op. `m_maxFPS` is de kopie, dus die moet je hebben
-om een ander getal af te dwingen. Maar `m_useFpsLimit` wordt **wel** elke lus
-opnieuw gelezen, en dat is precies waarom "Onbeperkt" altijd werkt, ook als
-de kopie niet gevonden wordt.
-
-Nu worden beide plekken geschreven: de kopie voor het potje dat nu draait, en
-de INI-waarde voor elke View en elke reset die daarna nog komt. En omdat een
-nieuwe kaart de kopie terugzet, gebeurt dat elke tik opnieuw in plaats van
-alleen bij het omzetten van de knop.
-
-### De kopieen terugvinden
-
-Geen van beide staat in een veldtabel, dus ze worden op hun vorm herkend.
-
-**De camera.** De zes Reals staan in declaratievolgorde achter elkaar en de
-eerste twee zijn constanten die nergens anders worden geschreven:
+Binnen dat object wordt het blok van zes Reals gezocht:
 
 ```cpp
-m_maxZoom = 1.3f;      // <- acht bytes die nergens anders zo staan
+m_maxZoom = 1.3f;      // <- constanten die nergens anders worden geschreven
 m_minZoom = 0.2f;
 m_maxHeightAboveGround = TheGlobalData->m_maxCameraHeight;
 m_minHeightAboveGround = TheGlobalData->m_minCameraHeight;   // <- exacte kopie
 ```
 
-`1.3f` gevolgd door `0.2f` is de vingerafdruk; dat `m_minHeightAboveGround`
-exact gelijk is aan de waarde uit `TheGlobalData` is de bevestiging. Voor
-elke schrijfactie wordt die vingerafdruk opnieuw gecontroleerd, zodat een
-View die intussen verhuisd of opgeruimd is niet leidt tot schrijven in
-vreemd geheugen.
+Onthouden wordt de **globale pointer**, niet het adres van de View. Elke tik
+wordt hij opnieuw gevolgd, wordt de vtable van het object vergeleken met die
+van bij het injecteren, en wordt de vingerafdruk opnieuw gecontroleerd. Een
+View die opnieuw is aangemaakt wordt zo gewoon meegenomen; een blok dat geen
+View meer is, wordt overgeslagen.
 
-**De fps-limiet.** `GameEngine` is een kleine klasse met een vaste staart:
-
-```cpp
-class GameEngine : public SubsystemInterface {
-    ...
-    Int  m_maxFPS;
-    Bool m_quitting;
-    Bool m_isActive;
-};
-```
-
-Gezocht wordt dus: een object met een rijke vtable (dertig virtuele functies,
-een toevallig object heeft er zelden meer dan een paar), aangewezen door een
-globale pointer in de data van het image, met daarin de huidige limiet
-gevolgd door twee bytes die zich als bool gedragen en een `m_quitting` die
-nul is. Levert dat **meer dan een** kandidaat op, dan wordt er niets
-geschreven en verdwijnen de getallen uit de keuzelijst; Standaard en
-Onbeperkt blijven dan over.
+De INI-waarde in `TheGlobalData` wordt ook geschreven, want een View die nog
+gemaakt moet worden leest daaruit.
 
 ### Waarom niet via een INI-bestand
 
@@ -282,10 +268,8 @@ image waarvan het doelwit op die offsets een geloofwaardige set waarden heeft
 staan: een minimale camerahoogte onder de maximale, en een FPS-limiet tussen
 0 en 1000.
 
-Twee veiligheidsregels zitten hard in de DLL. `m_maxFPS` wordt alleen gezet
-op een positief getal, want de begrenzingslus rekent `1000/m_maxFPS` en nul
-zou delen door nul zijn. En `UseFPSLimit` is een `Bool`, dus één byte: er
-vier schrijven zou de vlag ernaast overschrijven.
+`UseFPSLimit` is een `Bool`, dus één byte: er vier schrijven zou de vlag
+ernaast overschrijven. Dat deed een eerdere versie wel.
 
 ## De trainer gebruiken
 

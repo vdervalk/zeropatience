@@ -711,6 +711,8 @@ std::string hexDump(const Target& t, uint64_t anchor, int32_t fromOff, int32_t t
 
 // ---------------------------------------------------------------------------
 // De View, en daarmee de echte camerabegrenzing.
+//
+// Vanaf de globale pointer naar binnen, niet vanaf het patroon naar buiten.
 // ---------------------------------------------------------------------------
 std::vector<ViewHit> findViews(const Target& t, float minCameraHeight,
                                float maxCameraHeight) {
@@ -721,82 +723,13 @@ std::vector<ViewHit> findViews(const Target& t, float minCameraHeight,
     // 1.3f en 0.2f als bytes. Exact vergelijken mag hier: het zijn literals
     // die de compiler heeft neergezet en die nooit worden herberekend.
     const float kMaxZoom = 1.3f, kMinZoom = 0.2f;
-    uint8_t needle[8];
-    memcpy(needle, &kMaxZoom, 4);
-    memcpy(needle + 4, &kMinZoom, 4);
+    const size_t ps = t.ptrSize();
+    const uint32_t kMaxBlockOffset = 0x200;
+
+    std::set<uint64_t> seen;
 
     for (const Snapshot& s : t.snapshots()) {
-        if (!s.region || !s.region->writable()) continue;
-        const uint8_t* d = s.bytes.data();
-        const size_t len = s.bytes.size();
-        if (len < 24) continue;
-
-        for (size_t i = 0; i + 24 <= len; i += 4) {
-            if (memcmp(d + i, needle, 8) != 0) continue;
-
-            float f[6];
-            memcpy(f, d + i, 24);
-
-            const float maxH = f[2], minH = f[3], zoom = f[4], height = f[5];
-
-            // m_minHeightAboveGround is een directe kopie van
-            // TheGlobalData->m_minCameraHeight en is daarna nergens meer
-            // aangeraakt. Dat maakt hem tot de scherpste controle die er is.
-            if (minH != minCameraHeight) continue;
-
-            // m_maxHeightAboveGround is diezelfde kopie maal een factor die
-            // een script of de kaart kan zetten, dus die ligt niet vast.
-            if (!std::isfinite(maxH) || maxH < minH) continue;
-            if (maxH > maxCameraHeight * 8.0f) continue;
-
-            if (!std::isfinite(zoom) || zoom <= 0.01f || zoom > 20.0f) continue;
-            if (!std::isfinite(height)) continue;
-            if (height < minH * 0.5f || height > maxH * 1.5f) continue;
-
-            ViewHit h;
-            h.addr = s.base + i;
-            h.maxHeightAddr = h.addr + 8;
-            h.maxHeight = maxH;
-            h.minHeight = minH;
-            h.zoom = zoom;
-            h.height = height;
-            out.push_back(h);
-        }
-    }
-    return out;
-}
-
-// ---------------------------------------------------------------------------
-// GameEngine::m_maxFPS.
-// ---------------------------------------------------------------------------
-
-// Hoeveel opeenvolgende slots van deze vtable naar code wijzen. GameEngine
-// heeft er dertig; een toevallig object heeft er zelden meer dan een paar.
-static uint32_t vtableDepth(const Target& t, uint64_t vt, uint32_t max) {
-    const size_t ps = t.ptrSize();
-    uint32_t n = 0;
-    for (; n < max; ++n) {
-        uint64_t fn = 0;
-        if (!t.rptr(vt + n * ps, fn)) break;
-        if (!fn || !t.isExecutable(fn)) break;
-    }
-    return n;
-}
-
-bool findGameEngine(const Target& t, int32_t fpsLimit, EngineHit* out) {
-    if (fpsLimit <= 0 || fpsLimit > 1000) return false;
-    const size_t ps = t.ptrSize();
-    const uint32_t kMinDepth = 16;   // ruim onder de dertig die er horen
-    const uint32_t kMaxOffset = 0x30;
-
-    EngineHit found;
-    // Op instantie plus offset, niet op vindplaats: hetzelfde object kan door
-    // meer dan een globale pointer worden aangewezen, en dat maakt het nog
-    // steeds een kandidaat en geen twee.
-    std::set<std::pair<uint64_t, uint32_t>> hits;
-
-    for (const Snapshot& s : t.snapshots()) {
-        if (!t.inImage(s.base)) continue;      // TheGameEngine staat in .data
+        if (!t.inImage(s.base)) continue;      // TheTacticalView staat in .data
         if (!s.region || !s.region->writable()) continue;
 
         const uint8_t* d = s.bytes.data();
@@ -808,35 +741,47 @@ bool findGameEngine(const Target& t, int32_t fpsLimit, EngineHit* out) {
 
             uint64_t vt = 0;
             if (!looksLikeInstance(t, p, &vt)) continue;
-            if (vtableDepth(t, vt, kMinDepth) < kMinDepth) continue;
+            if (!seen.insert(p).second) continue;
 
-            for (uint32_t k = (uint32_t)ps; k + 8 <= kMaxOffset; k += 4) {
-                uint32_t v = 0;
-                if (!t.r32(p + k, v)) break;
-                if ((int32_t)v != fpsLimit) continue;
+            for (uint32_t k = (uint32_t)ps; k + 24 <= kMaxBlockOffset; k += 4) {
+                float f[6];
+                bool readOk = true;
+                for (int j = 0; j < 6 && readOk; ++j)
+                    readOk = t.rf32(p + k + (uint32_t)j * 4, f[j]);
+                if (!readOk) break;
 
-                uint8_t quitting = 0, active = 0;
-                if (!t.r8(p + k + 4, quitting)) break;
-                if (!t.r8(p + k + 5, active)) break;
-                if (quitting != 0) continue;     // het spel draait nog
-                if (active > 1) continue;        // moet een bool zijn
+                if (f[0] != kMaxZoom || f[1] != kMinZoom) continue;
 
-                if (hits.insert({p, k}).second && hits.size() == 1) {
-                    found.pointerAddr = s.base + i;
-                    found.instance = p;
-                    found.vtable = vt;
-                    found.offMaxFps = k;
-                }
+                // m_minHeightAboveGround is een directe kopie van
+                // TheGlobalData->m_minCameraHeight en wordt daarna nergens
+                // meer aangeraakt. Dat is de scherpste controle die er is.
+                if (f[3] != minCameraHeight) continue;
+
+                // m_maxHeightAboveGround is diezelfde kopie maal een factor
+                // die een script of de kaart kan zetten, dus die ligt niet
+                // vast.
+                if (!std::isfinite(f[2]) || f[2] < f[3]) continue;
+                if (f[2] > maxCameraHeight * 8.0f) continue;
+
+                if (!std::isfinite(f[4]) || f[4] <= 0.01f || f[4] > 20.0f) continue;
+                if (!std::isfinite(f[5])) continue;
+                if (f[5] < f[3] * 0.5f || f[5] > f[2] * 1.5f) continue;
+
+                ViewHit h;
+                h.globalAddr = s.base + i;
+                h.instance = p;
+                h.vtable = vt;
+                h.blockOffset = k;
+                h.maxHeight = f[2];
+                h.minHeight = f[3];
+                h.zoom = f[4];
+                h.height = f[5];
+                out.push_back(h);
+                break;      // een View heeft dit blok maar een keer
             }
         }
     }
-
-    // Twee kandidaten betekent dat we niet weten welke het is, en dan is
-    // niets schrijven de enige verdedigbare keuze.
-    if (hits.size() != 1) return false;
-    *out = found;
-    return true;
+    return out;
 }
-
 
 } // namespace zp
