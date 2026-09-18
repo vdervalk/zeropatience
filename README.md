@@ -30,7 +30,7 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 2 | `zp-inject.exe` + F10-toggle | **klaar** |
 | 2 | Getest in de echte game (Generals) | **klaar** |
 | 3 | Compacte GUI met spelherkenning | **klaar** |
-| 3 | Zero Hour: probe-run schoon, dezelfde DLL | **klaar** |
+| 3 | Zero Hour: dezelfde DLL, getest in het spel | **klaar** |
 
 De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
 die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
