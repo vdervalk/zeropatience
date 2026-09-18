@@ -160,6 +160,14 @@ std::vector<ProcEntry> listProcesses();
 // Bekende procesnamen van Generals / Zero Hour, inclusief de heruitgave.
 bool looksLikeGenerals(const std::string& exeName);
 
+// Het volledige pad van de executable van een proces. Leeg als het niet op
+// te vragen is.
+//
+// Nodig om Generals van Zero Hour te onderscheiden: beide heten game.dat, dus
+// de procesnaam zegt niets. Het installatiepad wel, want dat eindigt op
+// "Command and Conquer Generals" of "... Generals Zero Hour".
+std::string processImagePath(DWORD pid);
+
 // Privaat vastgelegd geheugen van een proces, in bytes. Nul als het niet op
 // te vragen is. Wordt gebruikt om de echte game van zijn launcher te
 // onderscheiden: een launcher gebruikt tientallen MB, de engine honderden.

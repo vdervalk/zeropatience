@@ -202,6 +202,18 @@ std::vector<ProcEntry> listProcesses() {
     return out;
 }
 
+std::string processImagePath(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!h) return std::string();
+    char path[MAX_PATH] = {0};
+    DWORD n = sizeof(path);
+    std::string out;
+    if (QueryFullProcessImageNameA(h, 0, path, &n)) out = path;
+    CloseHandle(h);
+    return out;
+}
+
 uint64_t privateCommitBytes(DWORD pid) {
     HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (!h) h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);

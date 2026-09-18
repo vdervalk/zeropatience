@@ -1,9 +1,13 @@
 // zp-trainer - het venster waarmee je dit bedient.
 //
-// De GUI injecteert de DLL en praat er daarna mee via gedeeld geheugen. Dat
-// scheelt een consolevenster en, belangrijker, je ziet live of het werkt: de
-// teller met geblokkeerde schade loopt op zodra er op je units geschoten
-// wordt. Werkt het niet, dan staat in het logvenster waar het strandde.
+// Compact van opzet: tijdens het spelen wil je alleen weten of het aan staat
+// en of het werkt. Het verloop zit achter een knop, en klapt vanzelf uit als
+// er iets misgaat, want dan wil je het juist wel zien.
+//
+// De GUI injecteert de DLL en praat er daarna mee via gedeeld geheugen. De
+// teller met geblokkeerde schade is het punt: die loopt op zodra er op je
+// units geschoten wordt, dus je ziet dat het werkt in plaats van het te
+// moeten aannemen.
 
 #include "../common/shared.h"
 #include "../common/inject.h"
@@ -20,54 +24,82 @@ using namespace zp;
 // ------------------------------------------------------------------ opzet --
 
 enum : int {
-    ID_INJECT = 1001,
-    ID_TOGGLE,
+    ID_PRIMARY = 1001,   // koppelen, en daarna de aan/uit-schakelaar
+    ID_DETAILS,
     ID_UNHOOK,
     ID_COPYLOG,
     ID_HOTKEY,
     ID_TIMER = 1,
 };
 
+enum : int {
+    W_CLIENT      = 344,
+    H_COMPACT     = 196,
+    H_EXPANDED    = 470,
+};
+
 struct HotkeyChoice { const wchar_t* label; uint32_t vk; };
 
 // F10 opent in Windows het venstermenu en F12 is standaard Steam's screenshot,
 // dus die staan er bewust niet in. Scroll Lock is in spellen vrijwel nooit
-// gebonden en daarmee de veiligste keuze; F9 staat bovenaan omdat elk
-// toetsenbord die heeft.
+// gebonden; F9 staat bovenaan omdat elk toetsenbord die heeft.
 static const HotkeyChoice kHotkeys[] = {
-    {L"F9",            VK_F9},
-    {L"F8",            VK_F8},
-    {L"F7",            VK_F7},
-    {L"F6",            VK_F6},
-    {L"F5",            VK_F5},
-    {L"Scroll Lock",   VK_SCROLL},
-    {L"Pause",         VK_PAUSE},
-    {L"Insert",        VK_INSERT},
-    {L"Home",          VK_HOME},
-    {L"End",           VK_END},
-    {L"Numpad 0",      VK_NUMPAD0},
-    {L"Numpad *",      VK_MULTIPLY},
+    {L"F9",             VK_F9},
+    {L"F8",             VK_F8},
+    {L"F7",             VK_F7},
+    {L"F6",             VK_F6},
+    {L"F5",             VK_F5},
+    {L"Scroll Lock",    VK_SCROLL},
+    {L"Pause",          VK_PAUSE},
+    {L"Insert",         VK_INSERT},
+    {L"Home",           VK_HOME},
+    {L"End",            VK_END},
+    {L"Numpad 0",       VK_NUMPAD0},
+    {L"Numpad *",       VK_MULTIPLY},
     {L"Geen sneltoets", 0},
 };
+static const int kHotkeyCount = (int)(sizeof(kHotkeys) / sizeof(kHotkeys[0]));
 
-static HWND g_main, g_lblGame, g_btnInject, g_btnToggle, g_lblBlocked;
-static HWND g_cbHotkey, g_lblHotkeyHint, g_log, g_btnUnhook, g_btnCopy, g_lblWarn;
-static HFONT g_font;
+static HWND g_main, g_lblStatus, g_btnPrimary, g_lblBlocked, g_lblHotkey;
+static HWND g_cbHotkey, g_btnDetails, g_btnUnhook, g_btnCopy, g_log, g_lblWarn;
+static HFONT g_font, g_fontBig;
 
-static DWORD    g_gamePid = 0;       // gevonden spel
-static DWORD    g_hookedPid = 0;     // waar we in geinjecteerd hebben
+static DWORD    g_gamePid = 0;
 static HANDLE   g_mapping = nullptr;
 static Shared*  g_shared = nullptr;
 static uint32_t g_hotkeyVk = VK_F9;
 static uint32_t g_lastLogLen = 0;
+static bool     g_expanded = false;
+static bool     g_autoExpanded = false;   // eenmalig uitklappen bij een fout
+static std::wstring g_gameLabel;
+
+// --------------------------------------------------------- welk spel is dit --
+
+// Generals en Zero Hour heten allebei game.dat, dus de procesnaam zegt niets.
+// Het installatiepad wel.
+static std::wstring gameLabelFor(DWORD pid, const std::string& procName) {
+    std::string path = processImagePath(pid);
+    std::string low;
+    for (char c : path) low += (char)tolower((unsigned char)c);
+
+    if (low.find("zero hour") != std::string::npos ||
+        low.find("zerohour") != std::string::npos)
+        return L"Zero Hour";
+    if (low.find("generals") != std::string::npos)
+        return L"Generals";
+
+    // Pad niet leesbaar: terugvallen op de procesnaam in plaats van gokken.
+    std::wstring w(procName.begin(), procName.end());
+    return w.empty() ? L"onbekend spel" : w;
+}
 
 // ------------------------------------------------------------- instellingen --
 
 static std::string iniPath() { return pathNextToExe("zeropatience.ini"); }
 
 static void loadSettings() {
-    UINT vk = GetPrivateProfileIntA("trainer", "hotkey", VK_F9, iniPath().c_str());
-    g_hotkeyVk = (uint32_t)vk;
+    g_hotkeyVk = (uint32_t)GetPrivateProfileIntA("trainer", "hotkey", VK_F9,
+                                                 iniPath().c_str());
 }
 
 static void saveSettings() {
@@ -82,6 +114,7 @@ static void detachShared() {
     if (g_shared) { UnmapViewOfFile(g_shared); g_shared = nullptr; }
     if (g_mapping) { CloseHandle(g_mapping); g_mapping = nullptr; }
     g_lastLogLen = 0;
+    g_autoExpanded = false;
 }
 
 // De DLL maakt de mapping, wij openen hem. Andersom zou niet werken: wij
@@ -100,13 +133,12 @@ static bool attachShared(DWORD pid) {
         return false;
     }
     g_shared->hotkeyVk = g_hotkeyVk;
-    g_hookedPid = pid;   // ook als de sessie via zp-inject.exe is gestart
     return true;
 }
 
 // ------------------------------------------------------------------- spel --
 
-// Bij de EA-uitgave draaien Generals.exe en Game.dat naast elkaar. De eerste
+// Bij de EA-uitgave draaien Generals.exe en game.dat naast elkaar. De eerste
 // is een launcher, de tweede bevat de engine, en die is te herkennen aan het
 // geheugengebruik: tientallen MB tegenover honderden.
 static DWORD findGame(std::string* nameOut) {
@@ -152,117 +184,148 @@ static void appendLogFromShared() {
     SendMessageW(g_log, EM_SCROLLCARET, 0, 0);
 }
 
+// ------------------------------------------------------------- uitklappen --
+
+static void setExpanded(bool on) {
+    g_expanded = on;
+    ShowWindow(g_log, on ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_btnCopy, on ? SW_SHOW : SW_HIDE);
+    setText(g_btnDetails, on ? L"Minder" : L"Details");
+
+    RECT rc = {0, 0, W_CLIENT, on ? H_EXPANDED : H_COMPACT};
+    AdjustWindowRect(&rc, (DWORD)GetWindowLongPtrW(g_main, GWL_STYLE), FALSE);
+    SetWindowPos(g_main, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                 SWP_NOMOVE | SWP_NOZORDER);
+}
+
 // ------------------------------------------------------------- verversing --
 
 static void refresh() {
-    std::string gameName;
-    DWORD pid = findGame(&gameName);
-    g_gamePid = pid;
+    std::string procName;
+    DWORD pid = findGame(&procName);
 
-    if (!pid) {
-        setText(g_lblGame, L"Spel niet gevonden. Start Generals of Zero Hour.");
-    } else {
-        wchar_t buf[256];
-        swprintf(buf, 256, L"Gevonden: %s  (pid %lu)",
-                 widen(gameName.c_str()).c_str(), (unsigned long)pid);
-        setText(g_lblGame, buf);
+    if (pid != g_gamePid) {
+        g_gamePid = pid;
+        g_gameLabel = pid ? gameLabelFor(pid, procName) : L"";
     }
 
-    // Verbinding kwijt? Bijvoorbeeld doordat het spel is afgesloten.
-    if (g_shared && g_hookedPid && g_hookedPid != pid) {
-        detachShared();
-        g_hookedPid = 0;
-    }
-    if (!g_shared && pid) attachShared(pid);   // al geinjecteerd van eerder
+    // Verbinding kwijt, bijvoorbeeld doordat het spel is afgesloten.
+    if (g_shared && !pid) detachShared();
+    if (!g_shared && pid) attachShared(pid);   // mogelijk al eerder gekoppeld
 
     const bool connected = g_shared != nullptr;
     const uint32_t state = connected ? g_shared->state : STATE_STARTING;
     const bool ready = connected && state == STATE_READY;
+    const bool busy = connected && (state == STATE_CHECKING || state == STATE_RESOLVING);
 
-    EnableWindow(g_btnInject, pid != 0 && !connected);
-    EnableWindow(g_btnToggle, ready);
+    if (connected) appendLogFromShared();
+
+    // Statusregel.
+    wchar_t buf[256];
+    if (!pid) {
+        setText(g_lblStatus, L"●  Geen spel gevonden");
+    } else if (!connected) {
+        swprintf(buf, 256, L"●  %s  ·  pid %lu  ·  niet gekoppeld",
+                 g_gameLabel.c_str(), (unsigned long)pid);
+        setText(g_lblStatus, buf);
+    } else if (state == STATE_FAILED) {
+        swprintf(buf, 256, L"●  %s  ·  koppelen mislukt", g_gameLabel.c_str());
+        setText(g_lblStatus, buf);
+    } else if (state == STATE_DETACHED) {
+        swprintf(buf, 256, L"●  %s  ·  losgekoppeld", g_gameLabel.c_str());
+        setText(g_lblStatus, buf);
+    } else if (busy) {
+        swprintf(buf, 256, L"●  %s  ·  %s", g_gameLabel.c_str(),
+                 state == STATE_CHECKING ? L"thunk controleren" : L"offsets bepalen");
+        setText(g_lblStatus, buf);
+    } else {
+        swprintf(buf, 256, L"●  %s  ·  pid %lu", g_gameLabel.c_str(),
+                 (unsigned long)pid);
+        setText(g_lblStatus, buf);
+    }
+    InvalidateRect(g_lblStatus, nullptr, TRUE);
+
+    // De hoofdknop wisselt van rol: eerst koppelen, daarna schakelen.
+    if (ready) {
+        const bool on = g_shared->enabled != 0;
+        setText(g_btnPrimary, on ? L"AAN" : L"UIT");
+        EnableWindow(g_btnPrimary, TRUE);
+    } else if (busy) {
+        setText(g_btnPrimary, L"Bezig...");
+        EnableWindow(g_btnPrimary, FALSE);
+    } else {
+        setText(g_btnPrimary, pid ? L"Koppelen" : L"Koppelen");
+        EnableWindow(g_btnPrimary, pid != 0 && !connected);
+    }
+
+    // Teller.
+    if (ready) {
+        swprintf(buf, 256, L"Schade geblokkeerd:  %lu",
+                 (unsigned long)g_shared->blockedCount);
+        setText(g_lblBlocked, buf);
+    } else if (connected && state == STATE_FAILED) {
+        setText(g_lblBlocked, L"Zie het verloop hieronder");
+    } else {
+        setText(g_lblBlocked, L"");
+    }
+
     EnableWindow(g_btnUnhook, ready);
 
-    if (connected) {
-        appendLogFromShared();
-        const bool on = g_shared->enabled != 0;
-        setText(g_btnToggle, ready
-                ? (on ? L"Onkwetsbaarheid staat AAN" : L"Onkwetsbaarheid staat UIT")
-                : L"Onkwetsbaarheid");
-
-        wchar_t buf[128];
-        switch (state) {
-            case STATE_CHECKING:  swprintf(buf, 128, L"Bezig: thunk controleren"); break;
-            case STATE_RESOLVING: swprintf(buf, 128, L"Bezig: offsets bepalen"); break;
-            case STATE_FAILED:    swprintf(buf, 128, L"Mislukt, zie het log"); break;
-            case STATE_DETACHED:  swprintf(buf, 128, L"Hook verwijderd"); break;
-            default:
-                swprintf(buf, 128, L"Schade geblokkeerd: %lu",
-                         (unsigned long)g_shared->blockedCount);
-                break;
-        }
-        setText(g_lblBlocked, buf);
-    } else {
-        setText(g_btnToggle, L"Onkwetsbaarheid");
-        setText(g_lblBlocked, L"Nog niet gekoppeld");
+    // Bij een fout klapt het venster eenmalig uit: dan wil je het log zien.
+    if (connected && state == STATE_FAILED && !g_autoExpanded && !g_expanded) {
+        g_autoExpanded = true;
+        setExpanded(true);
     }
 }
 
 // --------------------------------------------------------------- opbouwen --
 
 static HWND mk(const wchar_t* cls, const wchar_t* text, DWORD style,
-               int x, int y, int w, int h, HWND parent, int id) {
+               int x, int y, int w, int h, HWND parent, int id, HFONT f = nullptr) {
     HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style,
                              x, y, w, h, parent, (HMENU)(INT_PTR)id,
                              GetModuleHandleW(nullptr), nullptr);
-    SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+    SendMessageW(c, WM_SETFONT, (WPARAM)(f ? f : g_font), TRUE);
     return c;
 }
 
 static void buildUi(HWND w) {
-    g_lblGame = mk(L"STATIC", L"", 0, 14, 12, 500, 20, w, 0);
+    g_lblStatus = mk(L"STATIC", L"", 0, 14, 12, W_CLIENT - 28, 20, w, 0);
 
-    g_btnInject = mk(L"BUTTON", L"Koppelen aan het spel", BS_DEFPUSHBUTTON,
-                     14, 38, 190, 30, w, ID_INJECT);
-    mk(L"STATIC", L"Laad eerst een skirmish met een paar eigen units.",
-       0, 214, 46, 300, 20, w, 0);
+    g_btnPrimary = mk(L"BUTTON", L"Koppelen", BS_PUSHBUTTON,
+                      14, 42, 140, 44, w, ID_PRIMARY, g_fontBig);
 
-    g_btnToggle = mk(L"BUTTON", L"Onkwetsbaarheid", BS_PUSHBUTTON,
-                     14, 84, 230, 34, w, ID_TOGGLE);
-    g_lblBlocked = mk(L"STATIC", L"Nog niet gekoppeld", 0, 256, 94, 258, 20, w, 0);
-
-    mk(L"STATIC", L"Sneltoets in het spel:", 0, 14, 134, 130, 20, w, 0);
+    g_lblHotkey = mk(L"STATIC", L"Sneltoets", 0, 172, 46, 70, 18, w, 0);
     g_cbHotkey = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
-                    150, 130, 130, 240, w, ID_HOTKEY);
+                    172, 64, 130, 240, w, ID_HOTKEY);
     for (const HotkeyChoice& k : kHotkeys)
         SendMessageW(g_cbHotkey, CB_ADDSTRING, 0, (LPARAM)k.label);
     int sel = 0;
-    for (int i = 0; i < (int)(sizeof(kHotkeys) / sizeof(kHotkeys[0])); ++i)
+    for (int i = 0; i < kHotkeyCount; ++i)
         if (kHotkeys[i].vk == g_hotkeyVk) sel = i;
     SendMessageW(g_cbHotkey, CB_SETCURSEL, sel, 0);
-    g_lblHotkeyHint = mk(L"STATIC",
-        L"F10 en F12 ontbreken met opzet: F10 opent het venstermenu\n"
-        L"van Windows en F12 is standaard Steam's screenshot.",
-        0, 292, 130, 222, 36, w, 0);
 
-    mk(L"STATIC", L"Log:", 0, 14, 176, 100, 18, w, 0);
+    g_lblBlocked = mk(L"STATIC", L"", 0, 14, 98, W_CLIENT - 28, 20, w, 0);
+
+    g_btnDetails = mk(L"BUTTON", L"Details", BS_PUSHBUTTON,
+                      14, 126, 90, 28, w, ID_DETAILS);
+    g_btnUnhook = mk(L"BUTTON", L"Loskoppelen", BS_PUSHBUTTON,
+                     112, 126, 110, 28, w, ID_UNHOOK);
+    g_btnCopy = mk(L"BUTTON", L"Log kopieren", BS_PUSHBUTTON,
+                   230, 126, 100, 28, w, ID_COPYLOG);
+
+    g_lblWarn = mk(L"STATIC",
+        L"Alleen voor skirmish en campagne. Zet dit zelf uit in multiplayer.",
+        0, 14, 162, W_CLIENT - 28, 18, w, 0);
+
     g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
+                            WS_CHILD | WS_VSCROLL | ES_MULTILINE |
                             ES_READONLY | ES_AUTOVSCROLL,
-                            14, 196, 500, 228, w, nullptr,
+                            14, 188, W_CLIENT - 28, 268, w, nullptr,
                             GetModuleHandleW(nullptr), nullptr);
     SendMessageW(g_log, WM_SETFONT, (WPARAM)g_font, TRUE);
 
-    g_btnUnhook = mk(L"BUTTON", L"Hook verwijderen", BS_PUSHBUTTON,
-                     14, 434, 160, 28, w, ID_UNHOOK);
-    g_btnCopy = mk(L"BUTTON", L"Log kopieren", BS_PUSHBUTTON,
-                   182, 434, 130, 28, w, ID_COPYLOG);
-
-    g_lblWarn = mk(L"STATIC",
-        L"Alleen voor skirmish en campagne. Er zit geen automatische controle "
-        L"op netwerkpotjes in, dus zet dit zelf uit als je tegen andere mensen "
-        L"speelt.",
-        0, 14, 470, 500, 40, w, 0);
+    setExpanded(false);
 }
 
 // ----------------------------------------------------------------- acties --
@@ -284,7 +347,6 @@ static void doInject() {
                     MB_ICONERROR | MB_OK);
         return;
     }
-    g_hookedPid = g_gamePid;
 
     // De DLL maakt zijn mapping in een eigen thread, dus even geduld.
     for (int i = 0; i < 40 && !attachShared(g_gamePid); ++i) Sleep(100);
@@ -318,9 +380,33 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             SetTimer(w, ID_TIMER, 250, nullptr);
             return 0;
 
-        case WM_CTLCOLORSTATIC:
-            SetBkMode((HDC)wp, TRANSPARENT);
+        case WM_CTLCOLORSTATIC: {
+            HDC dc = (HDC)wp;
+            SetBkMode(dc, TRANSPARENT);
+            // De stip in de statusregel kleurt mee: dat leest sneller dan
+            // tekst, en tijdens het spelen kijk je maar heel even.
+            if ((HWND)lp == g_lblStatus) {
+                COLORREF c = RGB(112, 112, 112);            // grijs: geen spel
+                if (g_shared) {
+                    switch (g_shared->state) {
+                        case STATE_READY:
+                            c = g_shared->enabled ? RGB(0, 140, 60)    // groen
+                                                  : RGB(180, 120, 0);  // amber
+                            break;
+                        case STATE_FAILED:   c = RGB(190, 40, 40); break;
+                        case STATE_CHECKING:
+                        case STATE_RESOLVING: c = RGB(180, 120, 0); break;
+                        default: break;
+                    }
+                } else if (g_gamePid) {
+                    c = RGB(60, 90, 160);                   // blauw: gevonden
+                }
+                SetTextColor(dc, c);
+            } else if ((HWND)lp == g_lblWarn) {
+                SetTextColor(dc, RGB(110, 110, 110));
+            }
             return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        }
 
         case WM_TIMER:
             if (wp == ID_TIMER) refresh();
@@ -328,12 +414,15 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_COMMAND: {
             const int id = LOWORD(wp);
-            if (id == ID_INJECT) { doInject(); return 0; }
-            if (id == ID_TOGGLE && g_shared) {
-                g_shared->enabled = g_shared->enabled ? 0 : 1;
+            if (id == ID_PRIMARY) {
+                if (g_shared && g_shared->state == STATE_READY)
+                    g_shared->enabled = g_shared->enabled ? 0 : 1;
+                else
+                    doInject();
                 refresh();
                 return 0;
             }
+            if (id == ID_DETAILS) { setExpanded(!g_expanded); return 0; }
             if (id == ID_UNHOOK && g_shared) {
                 g_shared->requestUnhook = 1;
                 return 0;
@@ -341,7 +430,7 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == ID_COPYLOG) { copyLog(); return 0; }
             if (id == ID_HOTKEY && HIWORD(wp) == CBN_SELCHANGE) {
                 int sel = (int)SendMessageW(g_cbHotkey, CB_GETCURSEL, 0, 0);
-                if (sel >= 0 && sel < (int)(sizeof(kHotkeys) / sizeof(kHotkeys[0]))) {
+                if (sel >= 0 && sel < kHotkeyCount) {
                     g_hotkeyVk = kHotkeys[sel].vk;
                     if (g_shared) g_shared->hotkeyVk = g_hotkeyVk;
                     saveSettings();
@@ -353,7 +442,7 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_DESTROY:
             // De hook blijft bewust staan als je dit venster sluit: het spel
-            // draait door en je wilt niet dat afsluiten je potje verandert.
+            // draait door en je wilt niet dat wegklikken je potje verandert.
             detachShared();
             PostQuitMessage(0);
             return 0;
@@ -368,13 +457,22 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
     InitCommonControlsEx(&icc);
     loadSettings();
 
-    // Het systeemlettertype overnemen, zodat het venster niet uit de toon valt.
     NONCLIENTMETRICSW ncm;
     ZeroMemory(&ncm, sizeof(ncm));
     ncm.cbSize = sizeof(ncm);
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
         g_font = CreateFontIndirectW(&ncm.lfMessageFont);
     if (!g_font) g_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+    LOGFONTW big;
+    ZeroMemory(&big, sizeof(big));
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+        big = ncm.lfMessageFont;
+        big.lfHeight = (LONG)(big.lfHeight * 1.5);
+        big.lfWeight = FW_SEMIBOLD;
+        g_fontBig = CreateFontIndirectW(&big);
+    }
+    if (!g_fontBig) g_fontBig = g_font;
 
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -387,10 +485,10 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
-    RECT rc = {0, 0, 528, 522};
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE);
-    g_main = CreateWindowExW(0, wc.lpszClassName, L"zeropatience",
-                             (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX),
+    const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
+    RECT rc = {0, 0, W_CLIENT, H_COMPACT};
+    AdjustWindowRect(&rc, style, FALSE);
+    g_main = CreateWindowExW(0, wc.lpszClassName, L"zeropatience", style,
                              CW_USEDEFAULT, CW_USEDEFAULT,
                              rc.right - rc.left, rc.bottom - rc.top,
                              nullptr, nullptr, inst, nullptr);

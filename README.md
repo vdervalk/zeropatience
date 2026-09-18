@@ -28,7 +28,9 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 1 | Klassen op naam aanwijzen via de memory-pool namen | **klaar, getest** |
 | 2 | `zp-freeze.dll`: de damage-hook | **klaar** |
 | 2 | `zp-inject.exe` + F10-toggle | **klaar** |
-| 2 | Getest in de echte game | **nog niet** |
+| 2 | Getest in de echte game (Generals) | **klaar** |
+| 3 | Compacte GUI met spelherkenning | **klaar** |
+| 3 | Zero Hour | wacht op een probe-run |
 
 De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
 die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
@@ -168,6 +170,28 @@ F10   onkwetsbaarheid aan of uit
 F11   status tonen (welke offsets, hoe hard het bewijs)
 F12   hook verwijderen
 ```
+
+### Werkt dit ook op Zero Hour?
+
+Waarschijnlijk zonder aanpassing. Zero Hour deelt elk anker waar de trainer
+op steunt, nagelopen in de `GeneralsMD/`-tree van de EA-broncode:
+
+| | Generals | Zero Hour |
+|---|---|---|
+| Poolnamen | `"ObjectPool"`, `"ActiveBody"` | gelijk |
+| `Module` | `: MemoryPoolObject, Snapshot` | gelijk |
+| `BehaviorModule` | `: ObjectModule, BehaviorModuleInterface` | gelijk |
+| `BodyModule` | `: BehaviorModule, BodyModuleInterface` | gelijk |
+| `PlayerList` | `m_local`, `m_playerCount`, `m_players[16]` | gelijk |
+
+Zero Hour heeft wel extra velden in `ActiveBody` (subdual damage), maar dat
+verschuift alleen offsets, en die worden bij het injecteren gemeten in plaats
+van vastgelegd. Er is dus geen tweede trainer, en daarmee ook niets om tussen
+te kiezen.
+
+De GUI onderscheidt de twee wel in de statusregel. Dat gaat op het
+installatiepad, want beide spellen heten `game.dat` en de procesnaam zegt
+dus niets.
 
 ### Waarom de thunk zich eerst laat controleren
 
