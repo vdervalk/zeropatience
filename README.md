@@ -136,6 +136,31 @@ code-patches, geen injectie. Alleen lezen.
 
 ---
 
+## Comfortinstellingen zonder injectie
+
+`qol/GameData.ini` verhoogt de beeldsnelheid en de maximale camerahoogte. Dat
+gaat buiten de trainer om: kopieer het naar `<spelmap>\Data\INI\` en
+herstart het spel. Geen DLL, geen injectie.
+
+Het werkt omdat de engine bij het opstarten twee bestanden achter elkaar
+laadt, en het parsen alleen velden zet die daadwerkelijk in het bestand
+staan:
+
+```cpp
+initSubsystem(TheWritableGlobalData, ..., &xferCRC,
+              "Data\INI\Default\GameData.ini",   // alle standaarden
+              "Data\INI\GameData.ini");           // de overlay
+```
+
+Een klein bestand stapelt dus bovenop de standaarden. Het originele bestand
+uit het `.big`-archief halen hoeft niet.
+
+Twee dingen om te weten. De simulatie blijft op 30 Hz lopen
+(`LOGICFRAMES_PER_SECOND` is een compile-time constante en replays zijn
+lockstep), dus een hogere limiet geeft vloeiender beeld en geen sneller spel.
+En die `&xferCRC` hierboven betekent dat `GameData.ini` meetelt in de
+INI-checksum, dus reken op een mismatch in netwerkpotjes.
+
 ## De trainer gebruiken
 
 ### Bouwen
