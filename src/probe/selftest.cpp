@@ -90,6 +90,17 @@ enum : uint32_t {
 
     FAKE_VT_REFS      = 400,
 
+    // Een nagebouwde INI-veldtabel. De engine bewaart de offsets van zijn
+    // eigen velden naast de naam:
+    //   struct FieldParse { const char* token; proc parse; const void* ud; Int offset; }
+    INI_STR_ADDR      = 0x00405000,   // "MaxCameraHeight"
+    INI_STR2_ADDR     = 0x00405020,   // "MinCameraHeight"
+    INI_TABLE_ADDR    = 0x00405100,
+    INI_OFF_MAXCAM    = 0x0120,       // de offsets die we moeten terugvinden
+    INI_OFF_MINCAM    = 0x0124,
+
+    GLOBALDATA_PTR    = 0x00411800,   // de globale pointer, in schrijfbare data
+
     // Naamanker-regressie: een poolnaam in alleen-lezen data, een verwijzing
     // ernaar in "code", en vlakbij een verwijzing naar de body-vtable. Zo
     // moet findNameAnchors de klasse op naam kunnen aanwijzen.
@@ -169,6 +180,26 @@ int runSelfTest() {
         memcpy(sp.imgAt(NAME_XREF_ADDR), &sref, 4);
         uint32_t vref = vtBodyIf;
         memcpy(sp.imgAt(NAME_XREF_ADDR) + 0x23, &vref, 4);
+    }
+
+    // Een veldtabel neerleggen, plus een object waar de offsets naar wijzen
+    // en een globale pointer daarnaartoe.
+    {
+        const char* n1 = "MaxCameraHeight";
+        const char* n2 = "MinCameraHeight";
+        memcpy(sp.imgAt(INI_STR_ADDR), n1, strlen(n1) + 1);
+        memcpy(sp.imgAt(INI_STR2_ADDR), n2, strlen(n2) + 1);
+
+        uint32_t entry[8] = {
+            INI_STR_ADDR,  CODE_ADDR, 0, INI_OFF_MAXCAM,
+            INI_STR2_ADDR, CODE_ADDR, 0, INI_OFF_MINCAM,
+        };
+        memcpy(sp.imgAt(INI_TABLE_ADDR), entry, sizeof(entry));
+
+        uint32_t gd = sp.alloc(0x400);
+        sp.putf(gd + INI_OFF_MAXCAM, 300.0f);
+        sp.putf(gd + INI_OFF_MINCAM, 100.0f);
+        memcpy(sp.dataAt(GLOBALDATA_PTR), &gd, 4);
     }
 
     // Spelers: alle zestien slots worden gealloceerd, precies zoals
@@ -373,6 +404,32 @@ int runSelfTest() {
              hv.empty() ? "niets" : (hv[0].vtable == vtBodyIf ? "juiste vtable" : "verkeerde vtable"),
              hv.empty() ? 0.0 : hv[0].ratio * 100.0);
     check("body-module herkend aan hitpoints", bodyOnTop, detail);
+
+    // --- offsets uit de INI-veldtabel --------------------------------------
+    {
+        std::vector<IniField> fields =
+            findIniFields(t, {"MaxCameraHeight", "MinCameraHeight"}, 0x8000);
+        uint32_t offMax = 0, offMin = 0;
+        for (const IniField& f : fields) {
+            if (f.name == "MaxCameraHeight") offMax = f.offset;
+            if (f.name == "MinCameraHeight") offMin = f.offset;
+        }
+        snprintf(detail, sizeof(detail), "+0x%x en +0x%x", offMax, offMin);
+        check("offsets uit de veldtabel gelezen",
+              offMax == INI_OFF_MAXCAM && offMin == INI_OFF_MINCAM, detail);
+
+        // "MinCameraHeight" mag niet gevonden worden als staart van iets
+        // langers, en de twee namen mogen elkaar niet verwisselen.
+        check("namen niet door elkaar gehaald", offMax != offMin);
+
+        GlobalDataHit g;
+        bool found = findGlobalData(t, offMax, offMin, 0, &g);
+        snprintf(detail, sizeof(detail), "%s",
+                 found ? "pointer gevonden" : "niets gevonden");
+        check("TheGlobalData via de offsets gevonden",
+              found && g.pointerAddr == GLOBALDATA_PTR &&
+              g.maxCameraHeight == 300.0f, detail);
+    }
 
     // --- klasse op naam aanwijzen -----------------------------------------
     {

@@ -208,6 +208,56 @@ std::vector<NameAnchor> findNameAnchors(const Target& t,
                                         const std::map<uint64_t, uint64_t>& instanceCounts,
                                         uint64_t minInstances);
 
+// --- offsets uit de INI-veldtabellen lezen ------------------------------
+//
+// De engine beschrijft zijn eigen structuren. Elke instelling die uit een INI
+// komt staat in een tabel van deze vorm:
+//
+//   struct FieldParse {
+//       const char*       token;      // +0   "MaxCameraHeight"
+//       INIFieldParseProc parse;      // +4   INI::parseReal
+//       const void*       userData;   // +8
+//       Int               offset;     // +12  offsetof( GlobalData, m_maxCameraHeight )
+//   };
+//
+// Die tabellen staan in de binary. We zoeken de naam als string, dan de
+// verwijzing ernaar, en lezen de offset op +12. Geen statistiek, geen
+// patroonherkenning: het spel vertelt zelf waar zijn velden staan.
+//
+// De structuur is identiek in Generals en Zero Hour.
+struct IniField {
+    std::string name;
+    uint64_t    entry = 0;      // adres van de FieldParse-entry
+    uint64_t    parseProc = 0;  // +4, moet naar code wijzen
+    uint64_t    userData = 0;   // +8
+    uint32_t    offset = 0;     // +12, de offsetof
+    uint32_t    candidates = 0; // hoeveel entries deze naam opleverde
+};
+
+std::vector<IniField> findIniFields(const Target& t,
+                                    const std::vector<std::string>& names,
+                                    uint32_t maxOffset);
+
+// --- TheGlobalData terugvinden -----------------------------------------
+//
+// Het object staat op de heap, de pointer ernaartoe in de schrijfbare data
+// van het image. Die pointer onthouden is wat je wilt: het object kan per
+// potje verhuizen, de globale pointer niet.
+//
+// Met exacte offsets uit de veldtabel is zoeken triviaal en betrouwbaar: we
+// eisen dat drie onafhankelijke velden tegelijk geloofwaardige waarden
+// bevatten, en dat de minimale camerahoogte onder de maximale ligt.
+struct GlobalDataHit {
+    uint64_t pointerAddr = 0;   // waar de globale pointer staat
+    uint64_t instance = 0;      // het GlobalData-object zelf
+    float    maxCameraHeight = 0;
+    float    minCameraHeight = 0;
+    int32_t  framesPerSecondLimit = 0;
+};
+
+bool findGlobalData(const Target& t, uint32_t offMaxCam, uint32_t offMinCam,
+                    uint32_t offFpsLimit, GlobalDataHit* out);
+
 // Volledig vtable-histogram als map, zodat instantietellingen elders
 // opzoekbaar zijn zonder opnieuw te scannen.
 std::map<uint64_t, uint64_t> vtableCounts(const Target& t);

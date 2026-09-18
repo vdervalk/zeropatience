@@ -11,8 +11,8 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 > Er zit **geen automatische controle** op netwerkpotjes in. Die zou een
 > adres vereisen dat in deze build niet betrouwbaar te vinden is, en een
 > controle die soms werkt is erger dan geen controle: dan vertrouw je erop.
-> Het is dus aan jou om dit uit te laten in multiplayer. F10 schakelt het uit
-> zonder het spel te herstarten.
+> Het is dus aan jou om dit uit te laten in multiplayer. De sneltoets (standaard
+> F9) schakelt het uit zonder het spel te herstarten.
 
 ---
 
@@ -31,6 +31,7 @@ worden onkwetsbaar, zodat een potje geen half uur micromanagen wordt.
 | 2 | Getest in de echte game (Generals) | **klaar** |
 | 3 | Compacte GUI met spelherkenning | **klaar** |
 | 3 | Zero Hour: dezelfde DLL, getest in het spel | **klaar** |
+| 4 | Comfortinstellingen (zoom, FPS) via het geheugen | **klaar, ongetest in het spel** |
 
 De trainer bepaalt zijn offsets zelf bij het injecteren, met dezelfde code
 die de probe gebruikt. Dat is geen luxe: de vtable-adressen liggen vast
@@ -138,15 +139,25 @@ code-patches, geen injectie. Alleen lezen.
 
 ## Comfortinstellingen
 
-`qol/GameData-toevoegen.ini` verhoogt de beeldsnelheid en de maximale
-camerahoogte.
+De trainer kan twee dingen bijstellen terwijl het spel draait:
 
-**Dit is geen losstaand bestand.** De regels moeten toegevoegd worden aan het
-bestaande `GameData`-blok van het spel. Zet je ze als los bestand in
-`Data\INI\`, dan start het spel niet meer op.
+| | Wat | Standaard |
+|---|---|---|
+| **Zoom** | hoe ver je kunt uitzoomen (`MaxCameraHeight`) | 300 |
+| **FPS** | de bovengrens van de beeldsnelheid (`FramesPerSecondLimit`) | 45 |
 
-Dat is geen voorzichtigheid maar ervaring: de eerste poging deed precies dat
-en Zero Hour crashte. De reden staat in de engine:
+Beide staan in de GUI, in de uitgeklapte weergave onder **Details**. Ze
+werken direct, zonder herstart, en "Standaard" zet de oorspronkelijke waarde
+terug. De keuze wordt onthouden in `zeropatience.ini` naast de trainer.
+
+De simulatie blijft op 30 Hz lopen. `LOGICFRAMES_PER_SECOND` is een
+compile-time constante en replays zijn lockstep, dus een hogere FPS-limiet
+geeft vloeiender beeld en **geen sneller spel**.
+
+### Waarom dit in het geheugen gebeurt en niet in een INI
+
+De eerste poging was een los `GameData.ini` in `Data\INI\`. Dat liet Zero
+Hour niet meer opstarten. De reden staat in de engine:
 
 ```cpp
 if (path1) ini.load(path1, INI_LOAD_OVERWRITE, pXfer );  // Default\GameData.ini
@@ -154,22 +165,52 @@ if (path2) ini.load(path2, INI_LOAD_OVERWRITE, pXfer );  // GameData.ini
 ```
 
 Die tests kijken naar de pointer, niet naar het bestand. Het zijn
-string-literals, dus beide bestanden worden altijd geladen, en een ontbrekend
-bestand gooit `INI_CANT_OPEN_FILE`. Omdat het spel zonder ingrijpen gewoon
-start, bestaat `Data\INI\GameData.ini` dus al binnen het `.big`-archief met
-echte inhoud. Een los bestand met die naam wint van het archief en gooit die
-inhoud weg.
+string-literals, dus altijd waar. `Data\INI\GameData.ini` bestaat dus al
+binnen het `.big`-archief, met de volledige echte inhoud, en een los bestand
+met die naam **wint** van het archief en gooit de rest weg.
 
-De werkwijze is dus: het origineel uit `INI.big` of `INIZH.big` halen, deze
-regels erbij plakken voor de afsluitende `End`, en het resultaat neerzetten.
-Bewaar een kopie van het origineel.
+De geheugenroute heeft dat probleem niet: er wordt niets aan de installatie
+veranderd, niets overschreven, en de INI-checksum (`&xferCRC`) blijft intact.
+Sluit je de trainer af met "Standaard" gekozen, dan is er geen spoor.
 
-Twee dingen om te weten. De simulatie blijft op 30 Hz lopen
-(`LOGICFRAMES_PER_SECOND` is een compile-time constante en replays zijn
-lockstep), dus een hogere limiet geeft vloeiender beeld en geen sneller spel.
-En de `&xferCRC` die aan het laden wordt meegegeven betekent dat
-`GameData.ini` meetelt in de INI-checksum, dus reken op een mismatch in
-netwerkpotjes.
+### Hoe de offsets gevonden worden
+
+Niet geraden, en ook niet statistisch. De engine bewaart zijn eigen
+veldoffsets in de binary, in de tabel waarmee hij INI-bestanden parseert:
+
+```cpp
+static const FieldParse TheGlobalDataFieldParseTable[] = {
+    { "MaxCameraHeight", INI::parseReal, NULL, offsetof( GlobalData, m_maxCameraHeight ) },
+    ...
+};
+```
+
+met
+
+```cpp
+struct FieldParse {
+    const char*      token;      // de naam zoals in de INI
+    INIFieldParseProc parse;
+    const void*      userData;
+    Int              offset;     // offsetof(), letterlijk in de binary
+};
+```
+
+Die structuur is in beide spellen gelijk. De trainer zoekt dus de string
+`"MaxCameraHeight"`, zoekt waar een pointer naar die string staat, en leest
+het getal twaalf bytes verderop. Dat **is** `offsetof`, door de compiler van
+jouw eigen build neergezet. Ter controle moet het veld ernaast op een
+uitvoerbare parse-functie wijzen en moet de offset binnen een plausibele
+structgrootte vallen.
+
+`TheGlobalData` zelf is daarna de enige pointer in de schrijfbare data van de
+image waarvan het doelwit op die offsets een geloofwaardige set waarden heeft
+staan: een minimale camerahoogte onder de maximale, en een FPS-limiet tussen
+0 en 1000.
+
+Eén veiligheidsregel zit hard in de DLL: `UseFPSLimit` wordt alleen
+aangezet als de limiet positief is. De begrenzingslus deelt door die waarde,
+dus aanzetten met een nul erin zou het spel laten hangen.
 
 ## De trainer gebruiken
 
@@ -180,17 +221,20 @@ sudo apt-get install mingw-w64
 make trainer
 ```
 
-Levert `build/zp-freeze.dll` en `build/zp-inject.exe`, beide 32-bit, want dat
-is het spel ook. Statisch gelinkt, dus er hoeft niets naast te staan.
+Levert `build/zp-trainer.exe` (de GUI), `build/zp-freeze.dll` en
+`build/zp-inject.exe` (de console-injector, voor als de GUI niet meewerkt).
+Alles 32-bit, want dat is het spel ook, en statisch gelinkt, dus er hoeft
+niets naast te staan.
 
 ### Draaien
 
 1. Start het spel en **laad een skirmish** met een paar eigen units. In een
    menu bestaan de structuren niet en kan de DLL niets bepalen.
-2. Zet `zp-inject.exe` en `zp-freeze.dll` in dezelfde map.
-3. Draai `zp-inject.exe` **als administrator**.
+2. Zet `zp-trainer.exe` en `zp-freeze.dll` in dezelfde map.
+3. Draai `zp-trainer.exe` **als administrator**.
 
-Er verschijnt een venster `zeropatience`. Dat doet, in deze volgorde:
+De GUI herkent het draaiende spel zelf en zet de naam in de statusregel.
+Op **Koppelen** gebeurt, in deze volgorde:
 
 | | |
 |---|---|
@@ -198,13 +242,13 @@ Er verschijnt een venster `zeropatience`. Dat doet, in deze volgorde:
 | **Offsets bepalen** | Duurt een paar seconden. Zelfde afleiding als de probe. |
 | **Hook plaatsen** | Eén pointer in de vtable, omkeerbaar. |
 
-Daarna:
+Daarna schakelt dezelfde knop tussen **AAN** en **UIT**, en doet de sneltoets
+hetzelfde zonder alt-tabben. Die is instelbaar (standaard **F9**) omdat de
+voor de hand liggende toetsen bezet zijn: F12 is Steam's screenshot en F10
+opent het venstermenu van Windows.
 
-```
-F10   onkwetsbaarheid aan of uit
-F11   status tonen (welke offsets, hoe hard het bewijs)
-F12   hook verwijderen
-```
+Onder **Details** zitten het log, de zoom- en FPS-keuze, en **Hook
+verwijderen**, dat de oorspronkelijke vtable-pointer terugzet.
 
 ### Werkt dit ook op Zero Hour?
 
@@ -418,6 +462,11 @@ src/common/derive.*    offsets afleiden met zelf-validerende invarianten
 src/common/sha256.h    build-vingerafdruk
 src/probe/main.cpp     rapportopbouw
 src/probe/selftest.cpp zelftest tegen een synthetische adresruimte
+src/freeze/dll.cpp     de vtable-hook, de sneltoets en de comfortinstellingen
+src/freeze/resolve.*   dezelfde afleiding, maar binnen het spelproces
+src/inject/main.cpp    console-injector
+src/gui/main.cpp       de GUI
+src/common/shared.h    gedeeld geheugen tussen GUI en DLL
 tests/fake_game.cpp    synthetisch testdoel
 tests/run_test.sh      testrunner
 docs/research.md       bevindingen uit de EA-broncode, met verwijzingen

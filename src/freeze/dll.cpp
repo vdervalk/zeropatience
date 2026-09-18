@@ -311,6 +311,72 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
     return 1;
 }
 
+// -------------------------------------------------------- comfortinstellingen --
+//
+// TheGlobalData is een gewone struct op de heap; we schrijven er rechtstreeks
+// in. Geen hook nodig, want deze waarden worden elke frame opnieuw gelezen.
+//
+// De pointer ernaartoe staat vast in de data van het image, dus dit blijft
+// geldig als je een nieuw potje start. Het object zelf kan verhuizen.
+
+static uint32_t g_qolLastCamera = 0xFFFFFFFFu;
+static uint32_t g_qolLastFps = 0xFFFFFFFFu;
+
+static void* globalData() {
+    if (!g_r.qolOk || !g_r.globalDataPtr) return nullptr;
+    void* p = *(void**)g_r.globalDataPtr;
+    return ptrOk(p) ? p : nullptr;
+}
+
+// Zet de gewenste waarden, of herstelt het origineel bij nul.
+static void applyQol() {
+    if (!g_shared || !g_r.qolOk) return;
+
+    const uint32_t wantCam = g_shared->qolCameraMax;
+    const uint32_t wantFps = g_shared->qolFpsLimit;
+    if (wantCam == g_qolLastCamera && wantFps == g_qolLastFps) return;
+
+    void* gd = globalData();
+    if (!gd) return;
+    char* base = (char*)gd;
+
+    if (g_r.offMaxCameraHeight) {
+        const float v = wantCam ? (float)wantCam : g_r.origMaxCameraHeight;
+        *(float*)(base + g_r.offMaxCameraHeight) = v;
+        logf("[zp] camerahoogte: %.0f\n", v);
+    }
+
+    if (g_r.offFramesPerSecondLimit) {
+        const int32_t v = wantFps ? (int32_t)wantFps : g_r.origFramesPerSecondLimit;
+        *(int32_t*)(base + g_r.offFramesPerSecondLimit) = v;
+        // De begrenzingslus deelt door deze waarde, dus hem aanzetten met nul
+        // erin zou een eeuwige lus geven. Alleen inschakelen bij een positief
+        // getal.
+        if (g_r.offUseFpsLimit) {
+            const uint32_t on = (v > 0) ? 1u : g_r.origUseFpsLimit;
+            *(uint32_t*)(base + g_r.offUseFpsLimit) = on;
+        }
+        logf("[zp] fps-limiet: %d\n", v);
+    }
+
+    g_qolLastCamera = wantCam;
+    g_qolLastFps = wantFps;
+}
+
+// Alles terugzetten zoals het spel het had.
+static void restoreQol() {
+    if (!g_r.qolOk) return;
+    void* gd = globalData();
+    if (!gd) return;
+    char* base = (char*)gd;
+    if (g_r.offMaxCameraHeight)
+        *(float*)(base + g_r.offMaxCameraHeight) = g_r.origMaxCameraHeight;
+    if (g_r.offFramesPerSecondLimit)
+        *(int32_t*)(base + g_r.offFramesPerSecondLimit) = g_r.origFramesPerSecondLimit;
+    if (g_r.offUseFpsLimit)
+        *(uint32_t*)(base + g_r.offUseFpsLimit) = g_r.origUseFpsLimit;
+}
+
 // ----------------------------------------------------------------- de hook --
 
 static bool installHook() {
@@ -422,6 +488,14 @@ static DWORD WINAPI worker(LPVOID) {
     logf("[zp] hook geplaatst, onkwetsbaarheid staat AAN.\n");
     status();
 
+    // Comfortinstellingen aanbieden als de resolutie ze heeft gevonden.
+    if (g_shared && g_r.qolOk) {
+        g_shared->qolAvailable = 1;
+        g_shared->qolOrigCameraMax = (uint32_t)(g_r.origMaxCameraHeight + 0.5f);
+        g_shared->qolOrigFpsLimit = (uint32_t)(g_r.origFramesPerSecondLimit < 0
+                                               ? 0 : g_r.origFramesPerSecondLimit);
+    }
+
     if (g_shared) {
         g_shared->hooked = 1;
         g_shared->enabled = 1;
@@ -453,6 +527,7 @@ static DWORD WINAPI worker(LPVOID) {
 
             if (g_shared->requestUnhook) {
                 g_enabled = false;
+                restoreQol();
                 removeHook();
                 g_shared->hooked = 0;
                 g_shared->enabled = 0;
@@ -462,6 +537,8 @@ static DWORD WINAPI worker(LPVOID) {
                 return 0;
             }
         }
+
+        applyQol();
 
         // De sneltoets is instelbaar omdat de voor de hand liggende toetsen
         // bezet zijn: F12 is standaard Steam's screenshot en F10 opent het
@@ -488,6 +565,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
         CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         g_enabled = false;
+        restoreQol();
         removeHook();
     }
     return TRUE;

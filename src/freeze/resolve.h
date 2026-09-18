@@ -60,6 +60,25 @@ struct Resolved {
     uintptr_t playerListGlobal = 0;
     uint32_t  localPlayerOffset = 0;
 
+    // --- comfortinstellingen ---------------------------------------------
+    //
+    // TheGlobalData staat op de heap maar de pointer ernaartoe staat vast in
+    // de schrijfbare data van het image. Die pointer onthouden we, want het
+    // object kan per potje verhuizen.
+    //
+    // De offsets komen uit de INI-veldtabellen van het spel zelf, waar ze
+    // naast de naam staan opgeslagen. Niets geraden.
+    bool     qolOk = false;
+    uint64_t globalDataPtr = 0;         // waar de globale pointer staat
+    uint32_t offMaxCameraHeight = 0;
+    uint32_t offFramesPerSecondLimit = 0;
+    uint32_t offUseFpsLimit = 0;
+
+    // Oorspronkelijke waarden, zodat we ze kunnen terugzetten.
+    float    origMaxCameraHeight = 0;
+    int32_t  origFramesPerSecondLimit = 0;
+    uint32_t origUseFpsLimit = 0;
+
     // Onderbouwing, zodat het log laat zien hoe hard het bewijs is.
     uint32_t healthConfirmations = 0;
     uint32_t linkConfirmations = 0;

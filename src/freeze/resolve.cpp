@@ -282,6 +282,49 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
     say("eigenaarsketen +0x%x / +0x%x / +0x%x, %u spelers\n",
         r.objectToTeam, r.teamToProto, r.protoToPlayer, r.chainPlayers);
 
+    // --- comfortinstellingen ----------------------------------------------
+    //
+    // Deze zijn optioneel: lukt het niet, dan blijft de rest gewoon werken en
+    // biedt de GUI die knoppen simpelweg niet aan.
+    {
+        std::vector<IniField> fields = findIniFields(
+            t, {"MaxCameraHeight", "MinCameraHeight", "FramesPerSecondLimit",
+                "UseFPSLimit"}, 0x8000);
+
+        uint32_t offMax = 0, offMin = 0, offFps = 0, offUse = 0;
+        for (const IniField& f : fields) {
+            if (!f.entry) continue;
+            if (f.name == "MaxCameraHeight")      offMax = f.offset;
+            else if (f.name == "MinCameraHeight") offMin = f.offset;
+            else if (f.name == "FramesPerSecondLimit") offFps = f.offset;
+            else if (f.name == "UseFPSLimit")     offUse = f.offset;
+        }
+
+        if (offMax && offMin) {
+            GlobalDataHit g;
+            if (findGlobalData(t, offMax, offMin, offFps, &g)) {
+                r.qolOk = true;
+                r.globalDataPtr = (uint64_t)g.pointerAddr;
+                r.offMaxCameraHeight = offMax;
+                r.offFramesPerSecondLimit = offFps;
+                r.offUseFpsLimit = offUse;
+                r.origMaxCameraHeight = g.maxCameraHeight;
+                r.origFramesPerSecondLimit = g.framesPerSecondLimit;
+                if (offUse) {
+                    uint32_t v = 0;
+                    if (t.r32(g.instance + offUse, v)) r.origUseFpsLimit = v;
+                }
+                say("comfort: TheGlobalData via 0x%llx, camera max %.0f, "
+                    "fps-limiet %d\n", (unsigned long long)g.pointerAddr,
+                    g.maxCameraHeight, g.framesPerSecondLimit);
+            } else {
+                say("comfort: TheGlobalData niet gevonden; knoppen blijven uit\n");
+            }
+        } else {
+            say("comfort: camera-offsets niet uit de veldtabel te lezen\n");
+        }
+    }
+
     r.ok = true;
     return r;
 }

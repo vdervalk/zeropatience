@@ -494,6 +494,106 @@ static std::vector<uint64_t> imageFindBytes(const Target& t,
     return hits;
 }
 
+bool findGlobalData(const Target& t, uint32_t offMaxCam, uint32_t offMinCam,
+                    uint32_t offFpsLimit, GlobalDataHit* out) {
+    if (!offMaxCam || !offMinCam) return false;
+    const size_t ps = t.ptrSize();
+
+    for (const Snapshot& s : t.snapshots()) {
+        if (!t.inImage(s.base)) continue;          // de globale pointer staat in .data
+        if (!s.region || !s.region->writable()) continue;
+
+        const uint8_t* d = s.bytes.data();
+        for (size_t i = 0; i + ps <= s.bytes.size(); i += ps) {
+            uint64_t p = 0;
+            if (ps == 4) { uint32_t x; memcpy(&x, d + i, 4); p = x; }
+            else         { memcpy(&p, d + i, 8); }
+            if (!p || !t.isMapped(p)) continue;
+
+            float mx = 0, mn = 0;
+            if (!t.rf32(p + offMaxCam, mx)) continue;
+            if (!t.rf32(p + offMinCam, mn)) continue;
+            if (!std::isfinite(mx) || !std::isfinite(mn)) continue;
+            if (mx < 50.0f || mx > 5000.0f) continue;
+            if (mn < 1.0f || mn > 5000.0f) continue;
+            if (mn >= mx) continue;
+
+            int32_t fps = 0;
+            if (offFpsLimit) {
+                uint32_t v = 0;
+                if (!t.r32(p + offFpsLimit, v)) continue;
+                fps = (int32_t)v;
+                if (fps < 0 || fps > 1000) continue;
+            }
+
+            out->pointerAddr = s.base + i;
+            out->instance = p;
+            out->maxCameraHeight = mx;
+            out->minCameraHeight = mn;
+            out->framesPerSecondLimit = fps;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<IniField> findIniFields(const Target& t,
+                                    const std::vector<std::string>& names,
+                                    uint32_t maxOffset) {
+    std::vector<IniField> out;
+    const size_t ps = t.ptrSize();
+
+    for (const std::string& name : names) {
+        IniField best;
+        best.name = name;
+
+        // De naam met afsluitende NUL, en het teken ervoor mag geen naamteken
+        // zijn. Anders vindt "CameraHeight" ook de staart van
+        // "MaxCameraHeight" en lezen we de verkeerde entry.
+        std::string needle = name + '\0';
+        for (uint64_t strAddr : imageFindBytes(t, needle.c_str(), needle.size())) {
+            uint8_t before = 0;
+            if (t.r8(strAddr - 1, before)) {
+                bool nameChar = (before >= 'A' && before <= 'Z') ||
+                                (before >= 'a' && before <= 'z') ||
+                                (before >= '0' && before <= '9') || before == '_';
+                if (nameChar) continue;
+            }
+
+            // Verwijzingen naar die string. Een veldtabel is uitgelijnde data,
+            // dus zoeken op woordgrens volstaat.
+            uint32_t le = (uint32_t)strAddr;
+            uint8_t pat[4] = {(uint8_t)le, (uint8_t)(le >> 8),
+                              (uint8_t)(le >> 16), (uint8_t)(le >> 24)};
+            for (uint64_t entry : imageFindBytes(t, pat, 4)) {
+                if (entry & (ps - 1)) continue;          // entry is uitgelijnd
+
+                uint64_t parseProc = 0, userData = 0;
+                uint32_t offset = 0;
+                if (!t.rptr(entry + ps, parseProc)) continue;
+                if (!t.rptr(entry + ps * 2, userData)) continue;
+                if (!t.r32(entry + ps * 3, offset)) continue;
+
+                // Drie onafhankelijke controles: de parser moet naar code
+                // wijzen, en de offset moet binnen een geloofwaardige
+                // structuurgrootte vallen.
+                if (!parseProc || !t.isExecutable(parseProc)) continue;
+                if (offset >= maxOffset) continue;
+
+                best.candidates++;
+                if (best.entry == 0) {
+                    best.entry = entry;
+                    best.parseProc = parseProc;
+                    best.userData = userData;
+                    best.offset = offset;
+                }
+            }
+        }
+        out.push_back(best);
+    }
+    return out;
+}
+
 std::vector<NameAnchor> findNameAnchors(const Target& t,
                                         const std::vector<std::string>& names,
                                         int32_t radius,

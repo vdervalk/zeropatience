@@ -61,6 +61,16 @@ struct Shared {
     // betekent: geen sneltoets, alleen schakelen via de GUI.
     uint32_t hotkeyVk;
 
+    // --- comfortinstellingen ---------------------------------------------
+    //
+    // De DLL zet qolAvailable en de oorspronkelijke waarden; de GUI zet wat
+    // hij wil hebben. Nul betekent "laat staan zoals het spel het had".
+    uint32_t qolAvailable;      // door de DLL gezet
+    uint32_t qolOrigCameraMax;  // idem, afgerond naar een geheel getal
+    uint32_t qolOrigFpsLimit;   // idem
+    uint32_t qolCameraMax;      // door de GUI gezet
+    uint32_t qolFpsLimit;       // idem
+
     char log[SHARED_LOG_BYTES];
 };
 
