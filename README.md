@@ -136,30 +136,40 @@ code-patches, geen injectie. Alleen lezen.
 
 ---
 
-## Comfortinstellingen zonder injectie
+## Comfortinstellingen
 
-`qol/GameData.ini` verhoogt de beeldsnelheid en de maximale camerahoogte. Dat
-gaat buiten de trainer om: kopieer het naar `<spelmap>\Data\INI\` en
-herstart het spel. Geen DLL, geen injectie.
+`qol/GameData-toevoegen.ini` verhoogt de beeldsnelheid en de maximale
+camerahoogte.
 
-Het werkt omdat de engine bij het opstarten twee bestanden achter elkaar
-laadt, en het parsen alleen velden zet die daadwerkelijk in het bestand
-staan:
+**Dit is geen losstaand bestand.** De regels moeten toegevoegd worden aan het
+bestaande `GameData`-blok van het spel. Zet je ze als los bestand in
+`Data\INI\`, dan start het spel niet meer op.
+
+Dat is geen voorzichtigheid maar ervaring: de eerste poging deed precies dat
+en Zero Hour crashte. De reden staat in de engine:
 
 ```cpp
-initSubsystem(TheWritableGlobalData, ..., &xferCRC,
-              "Data\INI\Default\GameData.ini",   // alle standaarden
-              "Data\INI\GameData.ini");           // de overlay
+if (path1) ini.load(path1, INI_LOAD_OVERWRITE, pXfer );  // Default\GameData.ini
+if (path2) ini.load(path2, INI_LOAD_OVERWRITE, pXfer );  // GameData.ini
 ```
 
-Een klein bestand stapelt dus bovenop de standaarden. Het originele bestand
-uit het `.big`-archief halen hoeft niet.
+Die tests kijken naar de pointer, niet naar het bestand. Het zijn
+string-literals, dus beide bestanden worden altijd geladen, en een ontbrekend
+bestand gooit `INI_CANT_OPEN_FILE`. Omdat het spel zonder ingrijpen gewoon
+start, bestaat `Data\INI\GameData.ini` dus al binnen het `.big`-archief met
+echte inhoud. Een los bestand met die naam wint van het archief en gooit die
+inhoud weg.
+
+De werkwijze is dus: het origineel uit `INI.big` of `INIZH.big` halen, deze
+regels erbij plakken voor de afsluitende `End`, en het resultaat neerzetten.
+Bewaar een kopie van het origineel.
 
 Twee dingen om te weten. De simulatie blijft op 30 Hz lopen
 (`LOGICFRAMES_PER_SECOND` is een compile-time constante en replays zijn
 lockstep), dus een hogere limiet geeft vloeiender beeld en geen sneller spel.
-En die `&xferCRC` hierboven betekent dat `GameData.ini` meetelt in de
-INI-checksum, dus reken op een mismatch in netwerkpotjes.
+En de `&xferCRC` die aan het laden wordt meegegeven betekent dat
+`GameData.ini` meetelt in de INI-checksum, dus reken op een mismatch in
+netwerkpotjes.
 
 ## De trainer gebruiken
 
