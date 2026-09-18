@@ -35,6 +35,25 @@ struct Resolved {
     uint32_t teamToProto = 0;
     uint32_t protoToPlayer = 0;
 
+    // Waar in DamageInfo het schadetype staat, gemeten in plaats van
+    // aangenomen. Nul betekent: niet vastgesteld, en dan valt de hook terug
+    // op alles blokkeren.
+    //
+    // Dit is nodig omdat Object::kill() geen schade is maar de opruimfunctie
+    // van de engine, en toch over attemptDamage loopt:
+    //
+    //   void Object::kill() {
+    //       DamageInfo d;
+    //       d.in.m_damageType = DAMAGE_UNRESISTABLE;
+    //       ...
+    //       attemptDamage( &d );
+    //   }
+    //
+    // Blokkeer je dat, dan kan een parachute zichzelf niet meer opruimen en
+    // blijft hij in beeld hangen.
+    uint32_t damageTypeOffset = 0;
+    uint32_t damageInfoInSize = 0;   // 0x18 = Generals, 0x40 = Zero Hour
+
     // De globale pointer naar ThePlayerList, plus waar m_local daarin staat.
     // De PlayerList zelf verhuist per potje; deze globale pointer niet, dus
     // hiermee blijft de hook geldig als je een nieuw potje start.

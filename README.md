@@ -209,19 +209,41 @@ echte vtable aan.
 
 ### Wat de hook wel en niet doet
 
-De hook keert terug voordat er iets met de schade gebeurt, precies zoals de
-engine zelf doet bij `m_indestructible`. Dat betekent dat ook healing en
-schade-achtige besturingssignalen niet doorkomen voor jouw objecten:
+De hook blokkeert **wapens** en laat **besturing van de engine** door. Dat
+onderscheid is niet cosmetisch, want `Object::kill()` is de opruimfunctie van
+het spel en loopt over hetzelfde pad als een kogel:
 
-- `DAMAGE_HEALING` is zinloos als je toch geen schade oploopt, dus dat is
-  geen verlies.
-- `DAMAGE_DEPLOY` gebruiken transporten om lading te lossen. Dat kan met
-  onkwetsbaarheid aan dus haperen bij een enkel eenheidstype.
+```cpp
+void Object::kill()
+{
+    DamageInfo damageInfo;
+    damageInfo.in.m_damageType = DAMAGE_UNRESISTABLE;
+    damageInfo.in.m_amount     = getBodyModule()->getMaxHealth();
+    attemptDamage( &damageInfo );
+}
+```
 
-Dit gedrag is gekozen omdat het exact is wat de engine zelf doet, en omdat
-onderscheid maken op schadetype een offset in `DamageInfo` vereist die nog
-niet met zekerheid vaststaat. Raad liever niet in het schadepad. Loop je
-ertegenaan, zet dan even F10 uit.
+Een eerdere versie blokkeerde alles, en toen bleven parachutes na een
+paradrop in beeld hangen: de parachute kon zichzelf niet meer opruimen.
+Hetzelfde gold voor transporten die lossen, voor verdrinken, en voor het
+opruimen van straling- en gifvelden.
+
+Deze types komen door: `HEALING`, `UNRESISTABLE`, `WATER`, `DEPLOY`,
+`SURRENDER`, `HACK`, `DISARM` en `HAZARD_CLEANUP`. De nummers 0 tot en met 30
+betekenen in Generals en Zero Hour hetzelfde, dus die lijst werkt voor
+allebei.
+
+**De prijs:** een script dat `kill()` op jouw eenheid aanroept, werkt weer.
+In de campagne is dat waarschijnlijk juist de bedoeling, anders loopt de
+missie vast. In skirmish komt het nauwelijks voor.
+
+De offset van het schadetype in `DamageInfo` verschilt tussen de twee
+spellen, dus die wordt **gemeten** in plaats van vastgelegd. `DamageInfo`
+bestaat uit drie delen die elk van `Snapshot` erven en dus elk een vptr
+hebben; de afstand tussen de vptr van `in` en die van `out` is precies
+`sizeof(DamageInfoInput)`, en die is ondubbelzinnig: `0x18` in Generals,
+`0x40` in Zero Hour. Lukt het meten niet, dan valt de hook terug op alles
+blokkeren en zegt dat in het log.
 
 ---
 

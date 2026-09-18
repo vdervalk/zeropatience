@@ -170,6 +170,74 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
         return r;
     }
 
+    // --- indeling van DamageInfo meten ------------------------------------
+    //
+    // ActiveBody bevat m_lastDamageInfo als gewoon veld, en DamageInfo bestaat
+    // uit drie stukken die elk van Snapshot erven en dus elk een vptr hebben:
+    // DamageInfo zelf, dan 'in', dan 'out'. De afstand tussen de vptr van 'in'
+    // en die van 'out' is precies sizeof(DamageInfoInput), en die verschilt
+    // ondubbelzinnig tussen de twee spellen:
+    //
+    //   Generals   0x18   vptr, m_sourceID, m_sourcePlayerMask,
+    //                     m_damageType, m_deathType, m_amount
+    //   Zero Hour  0x40   idem plus m_sourceTemplate, m_damageStatusType,
+    //                     m_damageFXOverride, m_kill en de shockwave-velden
+    //
+    // De vptrs staan er ook als een object nog nooit schade heeft gehad, want
+    // de constructor zet ze. Meten kan dus meteen.
+    {
+        auto isVtable = [&](uint64_t v) { return v && counts.count(v) != 0; };
+        std::map<uint32_t, uint32_t> sizeVotes;
+
+        std::vector<uint64_t> insts = instancesOf(t, r.bodyVtable, 64, true);
+        for (uint64_t self : insts) {
+            const int32_t from = r.healthOffset + 16;
+            for (int32_t off = from; off < from + 0x80; off += 4) {
+                uint64_t a = 0, b = 0;
+                if (!t.rptr((uint64_t)((int64_t)self + off), a)) break;
+                if (!t.rptr((uint64_t)((int64_t)self + off + 4), b)) break;
+                if (!isVtable(a) || !isVtable(b)) continue;
+
+                // Gevonden: DamageInfo op off, 'in' op off+4. Nu 'out'.
+                for (int32_t o2 = off + 8; o2 < off + 0x80; o2 += 4) {
+                    uint64_t c = 0;
+                    if (!t.rptr((uint64_t)((int64_t)self + o2), c)) break;
+                    if (!isVtable(c)) continue;
+                    sizeVotes[(uint32_t)(o2 - (off + 4))]++;
+                    break;
+                }
+                break;
+            }
+        }
+
+        if (!sizeVotes.empty()) {
+            auto best = std::max_element(sizeVotes.begin(), sizeVotes.end(),
+                                         [](const auto& x, const auto& y) {
+                                             return x.second < y.second;
+                                         });
+            const uint32_t inSize = best->first;
+            // m_damageType staat na vptr, m_sourceID, eventueel
+            // m_sourceTemplate, en m_sourcePlayerMask.
+            uint32_t inOffset = 0;
+            if (inSize == 0x18)      inOffset = 0x0C;   // Generals
+            else if (inSize == 0x40) inOffset = 0x10;   // Zero Hour
+
+            if (inOffset && best->second >= 8) {
+                r.damageInfoInSize = inSize;
+                r.damageTypeOffset = 4 + inOffset;      // vanaf DamageInfo zelf
+                say("DamageInfo: in-grootte 0x%x (%s), schadetype op +0x%x\n",
+                    inSize, inSize == 0x18 ? "Generals" : "Zero Hour",
+                    r.damageTypeOffset);
+            } else {
+                say("DamageInfo: in-grootte 0x%x herken ik niet; de hook "
+                    "blokkeert straks alles.\n", inSize);
+            }
+        } else {
+            say("DamageInfo: indeling niet te meten; de hook blokkeert "
+                "straks alles.\n");
+        }
+    }
+
     uint64_t slot0 = 0;
     if (!t.rptr(r.bodyVtable, slot0) || !t.isExecutable(slot0)) {
         r.error = "slot 0 van de vtable wijst niet naar code";

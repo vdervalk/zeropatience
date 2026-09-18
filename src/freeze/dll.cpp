@@ -232,11 +232,59 @@ static inline bool ptrOk(const void* p) {
     return v >= 0x10000 && v < 0x80000000u && (v & 3) == 0;
 }
 
+// Welke schadetypes zijn wapens en welke zijn besturing van de engine?
+//
+// Dit onderscheid is niet cosmetisch. Object::kill() is de opruimfunctie van
+// de engine en loopt over hetzelfde pad als een kogel:
+//
+//   void Object::kill() {
+//       DamageInfo d;
+//       d.in.m_damageType = DAMAGE_UNRESISTABLE;
+//       d.in.m_amount     = getBodyModule()->getMaxHealth();
+//       attemptDamage( &d );
+//   }
+//
+// Blokkeer je dat ook, dan kan een parachute zichzelf niet meer opruimen en
+// blijft hij boven het slagveld hangen. Hetzelfde geldt voor een transport
+// dat lost, voor verdrinken, en voor het opruimen van straling- en gifvelden.
+//
+// De nummers 0 tot en met 30 betekenen in Generals en Zero Hour hetzelfde;
+// pas daarboven lopen de enums uiteen. Deze lijst blijft dus binnen dat
+// bereik en werkt voor allebei.
+enum : uint32_t {
+    DMG_HEALING         = 10,   // zinloos als je toch geen schade oploopt
+    DMG_UNRESISTABLE    = 11,   // Object::kill() en scripting
+    DMG_WATER           = 12,   // verdrinken, ook parachutes in het water
+    DMG_DEPLOY          = 13,   // transport lost zijn lading
+    DMG_SURRENDER       = 14,
+    DMG_HACK            = 15,
+    DMG_DISARM          = 20,   // mijnen en bommen onschadelijk maken
+    DMG_HAZARD_CLEANUP  = 21,   // straling- en gifvelden opruimen
+    DMG_NUM_TYPES       = 38,
+};
+
+static const uint32_t kPassThrough =
+    (1u << DMG_HEALING)  | (1u << DMG_UNRESISTABLE) | (1u << DMG_WATER) |
+    (1u << DMG_DEPLOY)   | (1u << DMG_SURRENDER)    | (1u << DMG_HACK)  |
+    (1u << DMG_DISARM)   | (1u << DMG_HAZARD_CLEANUP);
+
 extern "C" int zp_should_block(void* self, void* damageInfo) {
     if (g_forceBlock) return 1;         // alleen tijdens de zelfcontrole
     if (!g_enabled) return 0;
     if (!damageInfo) return 0;          // het origineel returnt hier zelf ook
     if (!ptrOk(self)) return 0;
+
+    // Is dit besturing in plaats van een wapen? Dan doorlaten, anders breekt
+    // de objectlevenscyclus van het spel.
+    //
+    // Lukte het niet om de indeling van DamageInfo te meten, dan is
+    // damageTypeOffset nul en blokkeren we alles. Dat is het oude gedrag: de
+    // bescherming blijft werken, maar de glitches komen terug.
+    if (g_r.damageTypeOffset) {
+        const uint32_t dt =
+            *(const uint32_t*)((const char*)damageInfo + g_r.damageTypeOffset);
+        if (dt < DMG_NUM_TYPES && (kPassThrough & (1u << dt))) return 0;
+    }
 
     const char* s = (const char*)self;
 
@@ -311,6 +359,12 @@ static void status() {
     logf("[zp] this -> health  +0x%x\n", (unsigned)g_r.healthOffset);
     logf("[zp] eigenaarsketen  +0x%x / +0x%x / +0x%x  (%u spelers)\n",
          g_r.objectToTeam, g_r.teamToProto, g_r.protoToPlayer, g_r.chainPlayers);
+    if (g_r.damageTypeOffset)
+        logf("[zp] schadetype op   DamageInfo+0x%x  (in-grootte 0x%x, %s)\n",
+             g_r.damageTypeOffset, g_r.damageInfoInSize,
+             g_r.damageInfoInSize == 0x18 ? "Generals" : "Zero Hour");
+    else
+        logf("[zp] schadetype      niet gemeten; alles wordt geblokkeerd\n");
 }
 
 static DWORD WINAPI worker(LPVOID) {
