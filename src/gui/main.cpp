@@ -167,6 +167,13 @@ static std::wstring widen(const char* s) {
 static void appendLogFromShared() {
     if (!g_shared) return;
     uint32_t len = g_shared->logLength;
+    // Korter dan wat we al hadden betekent dat de DLL opnieuw begonnen is.
+    // Dan moet het venster mee, anders blijft de oude mislukking staan.
+    if (len < g_lastLogLen) {
+        g_lastLogLen = 0;
+        SetWindowTextW(g_log, L"");
+        g_autoExpanded = false;
+    }
     if (len <= g_lastLogLen) return;
     std::string chunk(g_shared->log + g_lastLogLen, len - g_lastLogLen);
     g_lastLogLen = len;
@@ -245,7 +252,7 @@ static void refresh() {
     }
     InvalidateRect(g_lblStatus, nullptr, TRUE);
 
-    // De hoofdknop wisselt van rol: eerst koppelen, daarna schakelen.
+    // De hoofdknop wisselt van rol: koppelen, opnieuw proberen, schakelen.
     if (ready) {
         const bool on = g_shared->enabled != 0;
         setText(g_btnPrimary, on ? L"AAN" : L"UIT");
@@ -253,8 +260,13 @@ static void refresh() {
     } else if (busy) {
         setText(g_btnPrimary, L"Bezig...");
         EnableWindow(g_btnPrimary, FALSE);
+    } else if (connected && (state == STATE_FAILED || state == STATE_DETACHED)) {
+        // De DLL zit al in het proces en wacht op een nieuw verzoek. Opnieuw
+        // injecteren zou niets doen, dus dit gaat via het gedeelde geheugen.
+        setText(g_btnPrimary, L"Opnieuw proberen");
+        EnableWindow(g_btnPrimary, TRUE);
     } else {
-        setText(g_btnPrimary, pid ? L"Koppelen" : L"Koppelen");
+        setText(g_btnPrimary, L"Koppelen");
         EnableWindow(g_btnPrimary, pid != 0 && !connected);
     }
 
@@ -264,7 +276,7 @@ static void refresh() {
                  (unsigned long)g_shared->blockedCount);
         setText(g_lblBlocked, buf);
     } else if (connected && state == STATE_FAILED) {
-        setText(g_lblBlocked, L"Zie het verloop hieronder");
+        setText(g_lblBlocked, L"Zit je in een potje? Probeer het opnieuw");
     } else {
         setText(g_lblBlocked, L"");
     }
@@ -415,10 +427,14 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND: {
             const int id = LOWORD(wp);
             if (id == ID_PRIMARY) {
-                if (g_shared && g_shared->state == STATE_READY)
+                const uint32_t st = g_shared ? g_shared->state : STATE_STARTING;
+                if (g_shared && st == STATE_READY) {
                     g_shared->enabled = g_shared->enabled ? 0 : 1;
-                else
+                } else if (g_shared && (st == STATE_FAILED || st == STATE_DETACHED)) {
+                    g_shared->requestRetry = 1;
+                } else {
                     doInject();
+                }
                 refresh();
                 return 0;
             }

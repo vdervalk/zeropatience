@@ -367,27 +367,11 @@ static void status() {
         logf("[zp] schadetype      niet gemeten; alles wordt geblokkeerd\n");
 }
 
-static DWORD WINAPI worker(LPVOID) {
-    if (!openShared()) {
-        // Zonder gedeeld geheugen is er geen GUI om naartoe te praten, dus
-        // dan maar een console. Stil mislukken is geen optie.
-        AllocConsole();
-        SetConsoleTitleA("zeropatience");
-        g_console = GetStdHandle(STD_OUTPUT_HANDLE);
-        logf("[zp] geen gedeeld geheugen; terugval op dit venster.\n");
-    }
-    banner();
-
-    setState(STATE_CHECKING);
-    logf("[zp] thunk controleren...\n");
-    if (!selfCheckThunk()) {
-        logf("\n[zp] AFGEBROKEN: de aanroepconventie van de thunk klopt niet.\n");
-        logf("[zp] Er wordt niets gehookt. Dit zou het spel laten crashen.\n\n");
-        setState(STATE_FAILED);
-        return 0;
-    }
-    logf("[zp] thunk in orde: doorgeven en blokkeren laten de stack terecht.\n\n");
-
+// Een poging: offsets bepalen en de hook plaatsen. Losgetrokken van de
+// worker zodat hij herhaald kan worden zonder de DLL opnieuw te laden. Dat
+// laatste kan namelijk niet: de module zit al in het proces, LoadLibrary
+// geeft dan de bestaande terug en DllMain draait niet nog een keer.
+static bool attachOnce() {
     setState(STATE_RESOLVING);
     logf("[zp] offsets bepalen...\n");
     // Ruim genomen. Een eerdere poging met 192 MB mislukte: het spel houdt
@@ -401,11 +385,12 @@ static DWORD WINAPI worker(LPVOID) {
     g_r = resolveInProcess(1024, logf);
     if (!g_r.ok) {
         logf("\n[zp] MISLUKT: %s\n\n", g_r.error.c_str());
-        logf("[zp] Meest waarschijnlijke oorzaak: geinjecteerd terwijl je in een\n");
-        logf("[zp] menu zat. Laad eerst een skirmish met een paar eigen units,\n");
-        logf("[zp] en injecteer dan.\n");
+        logf("[zp] Meestal is het timing: het spel moet een kaart geladen\n");
+        logf("[zp] hebben en jij moet er zelf eenheden op hebben staan. Een\n");
+        logf("[zp] menu, een laadscherm of een intro is te vroeg.\n");
+        logf("[zp] Klik op Opnieuw proberen zodra je in het potje zit.\n");
         setState(STATE_FAILED);
-        return 0;
+        return false;
     }
 
     logf("\n[zp] gelukt. Bewijs: %u hitpoint-bevestigingen, %u link-bevestigingen,\n"
@@ -415,7 +400,7 @@ static DWORD WINAPI worker(LPVOID) {
     if (!installHook()) {
         logf("[zp] MISLUKT: kan het vtable-slot niet schrijven\n");
         setState(STATE_FAILED);
-        return 0;
+        return false;
     }
     g_hooked = true;
     g_enabled = true;
@@ -437,7 +422,11 @@ static DWORD WINAPI worker(LPVOID) {
         g_shared->linkConfirmations = g_r.linkConfirmations;
     }
     setState(STATE_READY);
+    return true;
+}
 
+// Draait zolang de hook staat. Keert terug als de GUI om loskoppelen vraagt.
+static void runHooked() {
     bool hotkeyDown = false;
     for (;;) {
         Sleep(30);
@@ -459,7 +448,7 @@ static DWORD WINAPI worker(LPVOID) {
                 g_shared->requestUnhook = 0;
                 setState(STATE_DETACHED);
                 logf("[zp] hook verwijderd op verzoek van de GUI.\n");
-                return 0;
+                return;
             }
         }
 
@@ -478,6 +467,53 @@ static DWORD WINAPI worker(LPVOID) {
         } else {
             hotkeyDown = false;
         }
+    }
+}
+
+// Wacht tot de GUI om een nieuwe poging vraagt. Zonder gedeeld geheugen is er
+// niemand die dat kan vragen, en dan houdt het hier op.
+static bool waitForRetry() {
+    if (!g_shared) return false;
+    for (;;) {
+        Sleep(100);
+        if (!g_shared->requestRetry) continue;
+        g_shared->requestRetry = 0;
+
+        // Het log leeghalen, anders staat de oude mislukking er nog boven en
+        // is niet te zien welke regels bij deze poging horen.
+        g_shared->logLength = 0;
+        g_shared->log[0] = 0;
+        return true;
+    }
+}
+
+static DWORD WINAPI worker(LPVOID) {
+    if (!openShared()) {
+        // Zonder gedeeld geheugen is er geen GUI om naartoe te praten, dus
+        // dan maar een console. Stil mislukken is geen optie.
+        AllocConsole();
+        SetConsoleTitleA("zeropatience");
+        g_console = GetStdHandle(STD_OUTPUT_HANDLE);
+        logf("[zp] geen gedeeld geheugen; terugval op dit venster.\n");
+    }
+    banner();
+
+    // De thunkcontrole hoeft maar een keer: die hangt aan de build, niet aan
+    // wat er in het spel gebeurt. Faalt hij, dan valt er niets te herhalen.
+    setState(STATE_CHECKING);
+    logf("[zp] thunk controleren...\n");
+    if (!selfCheckThunk()) {
+        logf("\n[zp] AFGEBROKEN: de aanroepconventie van de thunk klopt niet.\n");
+        logf("[zp] Er wordt niets gehookt. Dit zou het spel laten crashen.\n\n");
+        setState(STATE_FAILED);
+        return 0;
+    }
+    logf("[zp] thunk in orde: doorgeven en blokkeren laten de stack terecht.\n\n");
+
+    for (;;) {
+        if (attachOnce()) runHooked();
+        if (!waitForRetry()) return 0;
+        banner();
     }
 }
 

@@ -281,6 +281,31 @@ De GUI onderscheidt de twee wel in de statusregel. Dat gaat op het
 installatiepad, want beide spellen heten `game.dat` en de procesnaam zegt
 dus niets.
 
+### Als koppelen mislukt
+
+De trainer weigert liever dan dat hij gokt. Mislukt de afleiding, dan wordt
+er niets gehookt en zegt het log welke stap het niet haalde.
+
+Klik dan op **Opnieuw proberen**. Dat is geen nieuwe injectie: de DLL zit al
+in het proces en wacht op een verzoek. Opnieuw injecteren zou ook niets doen,
+want `LoadLibrary` geeft voor een module die al geladen is de bestaande
+terug, en `DllMain` draait niet nog een keer. Een eerdere versie liet je
+daardoor met een dood venster achter en de enige uitweg was het spel
+herstarten.
+
+De gebruikelijke oorzaak is timing. De afleiding heeft nodig dat er een
+kaart geladen is, dat jij er zelf eenheden op hebt staan, en dat er een
+tegenstander is: de eigenaarsketen moet bij jou uitkomen **en** over meer dan
+een speler spreiden. Een menu, een laadscherm of een intro is te vroeg.
+
+**Generals Challenge** is geen skirmish maar een campagnekaart
+(`m_gameMode == GAME_SINGLE_PLAYER` met `m_isChallengeCampaign`). De keten
+werkt er hetzelfde, maar zulke kaarten hebben vaak extra spelers die niets
+bezitten, zoals de plaatshouder `"ThePlayer"` die ontwerpers gebruiken om
+relaties in scripts te zetten. Daarom wordt er nu uit 256 objecten
+bemonsterd in plaats van 64: met een kleine steekproef kan het gebeuren dat
+er van jouw eigen eenheden niets in zit.
+
 ### Waarom de thunk zich eerst laat controleren
 
 `attemptDamage` is `__thiscall`: `this` in `ECX`, het argument op de stack,

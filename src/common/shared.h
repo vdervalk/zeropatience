@@ -55,6 +55,13 @@ struct Shared {
     uint32_t enabled;           // 0 of 1
     uint32_t requestUnhook;     // 1 = verzoek om de hook te verwijderen
 
+    // 1 = verzoek om het opnieuw te proberen na een mislukking of na
+    // loskoppelen. Zonder dit is een mislukte poging definitief: de DLL zit
+    // al in het proces, dus opnieuw injecteren doet niets (LoadLibrary geeft
+    // de bestaande module terug en DllMain draait niet nog een keer), en de
+    // enige uitweg was het spel herstarten.
+    uint32_t requestRetry;
+
     // Virtual-key code van de sneltoets die in het spel schakelt. Instelbaar,
     // want de voor de hand liggende toetsen zijn al bezet: F12 is standaard
     // Steam's screenshot, en F10 opent in Windows het venstermenu. Nul

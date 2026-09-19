@@ -268,11 +268,33 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
         (unsigned long long)r.playerListGlobal, (unsigned)r.localPlayerOffset);
 
     // --- eigenaarsketen ----------------------------------------------------
-    std::vector<uint64_t> objects = instancesOf(t, r.objectVtable, 64, true);
+    // Ruimer bemonsteren dan de 64 van eerst. De keten moet bij jou uitkomen
+    // en over meer dan een speler spreiden, en dat lukt niet als er van jouw
+    // eenheden toevallig niets in de steekproef zit. De extra kosten vallen
+    // mee: de dure lussen draaien alleen op offsets waar echt een object
+    // staat.
+    std::vector<uint64_t> objects = instancesOf(t, r.objectVtable, 256, true);
     std::vector<OwnerChain> chains =
         findOwnerChains(t, objects, pl.players, pl.localPlayer, 0x400, 0x80, 0x200);
     if (chains.empty() || !chains[0].localSeen || chains[0].distinctPlayers < 2) {
-        r.error = "geen eigenaarsketen die spreidt en bij jou uitkomt";
+        // Zeggen wat er wel lukte. "Mislukt" zonder meer maakt van de
+        // volgende poging weer een gok; dit maakt er een meting van.
+        say("eigenaarsketen: %u objecten bemonsterd, %u kandidaat-ketens\n",
+            (unsigned)objects.size(), (unsigned)chains.size());
+        if (!chains.empty()) {
+            say("beste keten +0x%x / +0x%x / +0x%x: %u spelers, jij %s\n",
+                chains[0].objectToTeam, chains[0].teamToProto,
+                chains[0].protoToPlayer, chains[0].distinctPlayers,
+                chains[0].localSeen ? "erbij" : "er niet bij");
+        }
+        if (!chains.empty() && chains[0].localSeen)
+            r.error = "de eigenaarsketen komt wel bij jou uit maar spreidt niet; "
+                      "staan er al vijandelijke eenheden op de kaart?";
+        else if (!chains.empty())
+            r.error = "er is wel een eigenaarsketen maar geen enkel object "
+                      "komt bij jou uit; heb je zelf al eenheden?";
+        else
+            r.error = "geen eigenaarsketen die spreidt en bij jou uitkomt";
         return r;
     }
     r.objectToTeam   = chains[0].objectToTeam;
