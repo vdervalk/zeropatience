@@ -1,0 +1,3 @@
+/* De manifest-resource moet id 1 hebben, dat is CREATEPROCESS_MANIFEST_RESOURCE_ID.
+   24 is RT_MANIFEST. */
+1 24 "app.manifest"
