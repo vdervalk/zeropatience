@@ -311,9 +311,25 @@ static const uint32_t kPassThrough =
     (1u << DMG_DEPLOY)   | (1u << DMG_SURRENDER)    | (1u << DMG_HACK)  |
     (1u << DMG_DISARM)   | (1u << DMG_HAZARD_CLEANUP);
 
+// Twee eenmalige regels in het log, en samen vertellen ze het hele verhaal
+// bij een melding "hij doet niets":
+//
+//   geen van beide  -> de hook draait niet. Verkeerde vtables, of er is
+//                      simpelweg nog niet op je geschoten.
+//   alleen "gezien" -> de hook draait wel, maar de eigenaarscontrole zegt
+//                      elke keer "niet van jou". Dan zit de fout in de keten.
+//   allebei         -> het werkt.
+//
+// Eenmalig via Interlocked, want de detour draait op de thread van het spel
+// en er kunnen er meerdere tegelijk binnenkomen.
+static LONG g_sawDamage = 0;
+static LONG g_sawBlock = 0;
+
 extern "C" int zp_should_block(void* self, void* damageInfo) {
     if (g_forceBlock) return 1;         // alleen tijdens de zelfcontrole
     if (!g_enabled) return 0;
+    if (InterlockedExchange(&g_sawDamage, 1) == 0)
+        logf("[zp] eerste schade langs de hook gezien.\n");
     if (!damageInfo) return 0;          // het origineel returnt hier zelf ook
     if (!ptrOk(self)) return 0;
 
@@ -351,6 +367,8 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
 
     if (owner != local) return 0;
     if (g_shared) g_shared->blockedCount++;
+    if (InterlockedExchange(&g_sawBlock, 1) == 0)
+        logf("[zp] eerste schade geblokkeerd -- het werkt.\n");
     return 1;
 }
 
@@ -454,6 +472,8 @@ static void status() {
 // laatste kan namelijk niet: de module zit al in het proces, LoadLibrary
 // geeft dan de bestaande terug en DllMain draait niet nog een keer.
 static bool attachOnce() {
+    InterlockedExchange(&g_sawDamage, 0);
+    InterlockedExchange(&g_sawBlock, 0);
     setState(STATE_RESOLVING);
     logf("[zp] offsets bepalen...\n");
     // Ruim genomen. Een eerdere poging met 192 MB mislukte: het spel houdt
@@ -520,7 +540,13 @@ static void runHooked() {
             const bool want = g_shared->enabled != 0;
             if (want != g_enabled) {
                 g_enabled = want;
-                logf("[zp] onkwetsbaarheid: %s\n", g_enabled ? "AAN" : "uit");
+                // Erbij zetten waar het vandaan kwam. Zonder die bron is een
+                // log met "uit" als laatste regel niet te lezen: dan is niet
+                // te zien of het venster of de sneltoets het omzette, en dat
+                // is precies het verschil tussen een bedieningsfout en een
+                // bug.
+                logf("[zp] onkwetsbaarheid: %s  (via het venster)\n",
+                     g_enabled ? "AAN" : "uit");
             }
 
             if (g_shared->requestUnhook) {
@@ -544,7 +570,8 @@ static void runHooked() {
             if (down && !hotkeyDown) {
                 g_enabled = !g_enabled;
                 if (g_shared) g_shared->enabled = g_enabled ? 1 : 0;
-                logf("[zp] onkwetsbaarheid: %s\n", g_enabled ? "AAN" : "uit");
+                logf("[zp] onkwetsbaarheid: %s  (via sneltoets 0x%02x)\n",
+                     g_enabled ? "AAN" : "uit", (unsigned)vk);
             }
             hotkeyDown = down;
         } else {

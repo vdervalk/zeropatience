@@ -245,6 +245,13 @@ static void refresh() {
         swprintf(buf, 256, L"●  %s  ·  %s", g_gameLabel.c_str(),
                  state == STATE_CHECKING ? L"thunk controleren" : L"offsets bepalen");
         setText(g_lblStatus, buf);
+    } else if (ready) {
+        // De stand hoort in de statusregel, niet alleen op de knop. Een knop
+        // waar "AAN" op staat is dubbelzinnig: dat leest als een stand en als
+        // een opdracht, en wie hem daarom aanklikt zet juist uit.
+        swprintf(buf, 256, L"●  %s  ·  onkwetsbaar %s", g_gameLabel.c_str(),
+                 g_shared->enabled ? L"AAN" : L"UIT");
+        setText(g_lblStatus, buf);
     } else {
         swprintf(buf, 256, L"●  %s  ·  pid %lu", g_gameLabel.c_str(),
                  (unsigned long)pid);
@@ -253,9 +260,11 @@ static void refresh() {
     InvalidateRect(g_lblStatus, nullptr, TRUE);
 
     // De hoofdknop wisselt van rol: koppelen, opnieuw proberen, schakelen.
+    // Op de knop staat wat er gebeurt als je hem indrukt, nooit hoe het nu
+    // staat -- die stand staat hierboven en in de kleur van de stip.
     if (ready) {
         const bool on = g_shared->enabled != 0;
-        setText(g_btnPrimary, on ? L"AAN" : L"UIT");
+        setText(g_btnPrimary, on ? L"Uitzetten" : L"Aanzetten");
         EnableWindow(g_btnPrimary, TRUE);
     } else if (busy) {
         setText(g_btnPrimary, L"Bezig...");
