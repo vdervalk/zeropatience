@@ -29,6 +29,7 @@ enum : int {
     ID_UNHOOK,
     ID_COPYLOG,
     ID_HOTKEY,
+    ID_PROTECT,
     ID_TIMER = 1,
 };
 
@@ -62,12 +63,14 @@ static const int kHotkeyCount = (int)(sizeof(kHotkeys) / sizeof(kHotkeys[0]));
 
 static HWND g_main, g_lblStatus, g_btnPrimary, g_lblBlocked, g_lblHotkey;
 static HWND g_cbHotkey, g_btnDetails, g_btnUnhook, g_btnCopy, g_log, g_lblWarn;
+static HWND g_lblProtect, g_cbProtect;
 static HFONT g_font, g_fontBig;
 
 static DWORD    g_gamePid = 0;
 static HANDLE   g_mapping = nullptr;
 static Shared*  g_shared = nullptr;
 static uint32_t g_hotkeyVk = VK_F9;
+static int32_t  g_protectPlayer = -1;   // -1 = jouw speler, -2 = iedereen
 static uint32_t g_lastLogLen = 0;
 static bool     g_expanded = false;
 static bool     g_autoExpanded = false;   // eenmalig uitklappen bij een fout
@@ -133,6 +136,7 @@ static bool attachShared(DWORD pid) {
         return false;
     }
     g_shared->hotkeyVk = g_hotkeyVk;
+    g_shared->protectPlayer = g_protectPlayer;
     return true;
 }
 
@@ -197,6 +201,8 @@ static void setExpanded(bool on) {
     g_expanded = on;
     ShowWindow(g_log, on ? SW_SHOW : SW_HIDE);
     ShowWindow(g_btnCopy, on ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_lblProtect, on ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_cbProtect, on ? SW_SHOW : SW_HIDE);
     setText(g_btnDetails, on ? L"Minder" : L"Details");
 
     RECT rc = {0, 0, W_CLIENT, on ? H_EXPANDED : H_COMPACT};
@@ -339,10 +345,25 @@ static void buildUi(HWND w) {
         L"Alleen voor skirmish en campagne. Zet dit zelf uit in multiplayer.",
         0, 14, 162, W_CLIENT - 28, 18, w, 0);
 
+    // Wie er beschermd wordt. Staat achter Details omdat je het normaal niet
+    // nodig hebt: "van jou" wordt afgeleid. Maar een afleiding kan fout zijn,
+    // en dan wil je het zelf kunnen zetten in plaats van te wachten.
+    g_lblProtect = mk(L"STATIC", L"Beschermen", 0, 14, 192, 76, 18, w, 0);
+    g_cbProtect = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
+                     96, 188, 234, 300, w, ID_PROTECT);
+    SendMessageW(g_cbProtect, CB_ADDSTRING, 0, (LPARAM)L"jouw speler (automatisch)");
+    SendMessageW(g_cbProtect, CB_ADDSTRING, 0, (LPARAM)L"alle spelers (alleen als test)");
+    for (int i = 0; i < 16; ++i) {
+        wchar_t b[32];
+        swprintf(b, 32, L"alleen speler %d", i);
+        SendMessageW(g_cbProtect, CB_ADDSTRING, 0, (LPARAM)b);
+    }
+    SendMessageW(g_cbProtect, CB_SETCURSEL, 0, 0);
+
     g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                             WS_CHILD | WS_VSCROLL | ES_MULTILINE |
                             ES_READONLY | ES_AUTOVSCROLL,
-                            14, 188, W_CLIENT - 28, 268, w, nullptr,
+                            14, 220, W_CLIENT - 28, 236, w, nullptr,
                             GetModuleHandleW(nullptr), nullptr);
     SendMessageW(g_log, WM_SETFONT, (WPARAM)g_font, TRUE);
 
@@ -453,6 +474,15 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (id == ID_COPYLOG) { copyLog(); return 0; }
+            if (id == ID_PROTECT && HIWORD(wp) == CBN_SELCHANGE) {
+                const int sel = (int)SendMessageW(g_cbProtect, CB_GETCURSEL, 0, 0);
+                // 0 -> -1 (de lokale speler), 1 -> -2 (iedereen), 2+k -> k.
+                if (sel >= 0) {
+                    g_protectPlayer = sel == 0 ? -1 : (sel == 1 ? -2 : sel - 2);
+                    if (g_shared) g_shared->protectPlayer = g_protectPlayer;
+                }
+                return 0;
+            }
             if (id == ID_HOTKEY && HIWORD(wp) == CBN_SELCHANGE) {
                 int sel = (int)SendMessageW(g_cbHotkey, CB_GETCURSEL, 0, 0);
                 if (sel >= 0 && sel < kHotkeyCount) {

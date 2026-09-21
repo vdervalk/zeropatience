@@ -18,7 +18,7 @@ namespace zp {
 
 enum : uint32_t {
     SHARED_MAGIC   = 0x5A504652u,   // "ZPFR"
-    SHARED_VERSION = 1,
+    SHARED_VERSION = 2,
     SHARED_LOG_BYTES = 16384,
 };
 
@@ -67,6 +67,15 @@ struct Shared {
     // Steam's screenshot, en F10 opent in Windows het venstermenu. Nul
     // betekent: geen sneltoets, alleen schakelen via de GUI.
     uint32_t hotkeyVk;
+
+    // Wie er beschermd wordt. -1 = de lokale speler, zoals de engine hem zelf
+    // kent; -2 = alle spelers, alleen als test; 0..15 = een vast spelernummer.
+    //
+    // Die laatste twee staan er omdat "van jou" een afgeleide is en dus fout
+    // kan zijn. Met alle spelers is in een tel te zien of de hook zelf werkt,
+    // en met een vast nummer kun je uit het log aflezen welke speler jij bent
+    // en dat instellen, zonder op de afleiding te wachten.
+    int32_t  protectPlayer;
 
     char log[SHARED_LOG_BYTES];
 };

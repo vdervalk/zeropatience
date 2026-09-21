@@ -62,6 +62,10 @@ static bool openShared() {
     g_shared->magic = SHARED_MAGIC;
     g_shared->version = SHARED_VERSION;
     g_shared->state = STATE_STARTING;
+    // Nul zou "speler 0" betekenen, en dat is de neutrale speler. De stand
+    // moet expliciet "de lokale speler" zijn, anders beschermt een verse
+    // mapping stilzwijgend het verkeerde.
+    g_shared->protectPlayer = -1;
     return true;
 }
 
@@ -367,6 +371,13 @@ enum Bail : int {
 };
 static LONG g_bail[BAIL_COUNT];
 
+// Hoeveel schade er naar welke speler ging. Zonder deze verdeling is "niet
+// van jou" een dood spoor: dan is niet te zien of alle schade naar een
+// vijand ging (dan klopt de keten en werd er gewoon niet op jou geschoten)
+// of dat de schade over meerdere spelers spreidt maar nooit bij jou uitkomt
+// (dan klopt onze notie van "jij" niet).
+static LONG g_ownerHist[17];   // 0..15 = spelernummer, 16 = onbekend
+
 // De hele keten van het eerste schade-event, stap voor stap bewaard. Een
 // telling zegt waar het strandt; deze adressen zeggen waarom. Alles wat niet
 // gelezen kon worden blijft nul.
@@ -448,7 +459,26 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
     if (record) { g_first.local = local; g_first.filled = true; }
     if (!ptrOk(local)) return bump(BAIL_LOCAL);
 
-    if (owner != local) {
+    // Welke speler is dit? m_playerIndex staat op een offset die bij alle
+    // zestien spelers klopte, dus dit nummer is te vertrouwen als het in
+    // bereik ligt.
+    int ownerIdx = -1;
+    if (g_r.playerIndexOffset) {
+        const uint32_t v =
+            *(const uint32_t*)((const char*)owner + g_r.playerIndexOffset);
+        if (v < 16) ownerIdx = (int)v;
+    }
+    InterlockedIncrement(&g_ownerHist[ownerIdx < 0 ? 16 : ownerIdx]);
+
+    // -1 = de lokale speler van de engine, -2 = iedereen (test),
+    // 0..15 = een vast nummer dat je zelf koos.
+    const int32_t mode = g_shared ? g_shared->protectPlayer : -1;
+    bool mine;
+    if (mode == -2)      mine = true;
+    else if (mode >= 0)  mine = (ownerIdx == mode);
+    else                 mine = (owner == local);
+
+    if (!mine) {
         g_sampleOwner = owner;
         g_sampleLocal = local;
         return bump(BAIL_NOTMINE);
@@ -538,6 +568,30 @@ static void dumpBails() {
         logf("[zp]   voorbeeld: eigenaar 0x%08x, jij 0x%08x\n",
              (unsigned)(uintptr_t)g_sampleOwner,
              (unsigned)(uintptr_t)g_sampleLocal);
+
+    // De verdeling over de spelers. Hier is in een oogopslag te zien of de
+    // schade naar een vijand ging of dat jouw nummer gewoon nooit voorkomt.
+    {
+        bool any = false;
+        for (int i = 0; i < 17; ++i) if (g_ownerHist[i]) any = true;
+        if (any) {
+            logf("[zp]   schade per speler:\n");
+            for (int i = 0; i < 17; ++i) {
+                if (!g_ownerHist[i]) continue;
+                if (i == 16) {
+                    logf("[zp]     onbekend   %ld\n", (long)g_ownerHist[i]);
+                    continue;
+                }
+                logf("[zp]     speler %-2d  %-6ld 0x%08x%s\n", i,
+                     (long)g_ownerHist[i], (unsigned)g_r.players[i],
+                     i == g_r.localIndex ? "   <-- volgens ons ben jij dit" : "");
+            }
+        }
+    }
+    if (g_shared && g_shared->protectPlayer != -1)
+        logf("[zp]   beschermd wordt nu: %s\n",
+             g_shared->protectPlayer == -2 ? "alle spelers (test)"
+                                           : "een vast spelernummer");
     if (g_sampleType != 0xFFFFFFFFu)
         logf("[zp]   laatst geziene schadetype: %u\n", (unsigned)g_sampleType);
     logf("[zp]   adresgrens van dit proces: 0x%08x\n", (unsigned)g_maxAddr);
@@ -607,6 +661,7 @@ static bool attachOnce() {
     InterlockedExchange(&g_sawBlock, 0);
     for (int i = 0; i < BAIL_COUNT; ++i) InterlockedExchange(&g_bail[i], 0);
     InterlockedExchange(&g_firstTaken, 0);
+    for (int i = 0; i < 17; ++i) InterlockedExchange(&g_ownerHist[i], 0);
     g_first = ChainSample();
     g_sampleOwner = g_sampleLocal = nullptr;
     g_sampleType = 0xFFFFFFFFu;

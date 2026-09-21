@@ -359,6 +359,53 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
     say("ThePlayerList: %u spelers, jij bent index %d\n",
         pl.playerCount, pl.localIndex);
 
+    r.playerCount         = pl.playerCount;
+    r.localIndex          = pl.localIndex;
+    r.localPlayerAtResolve = (uintptr_t)pl.localPlayer;
+    for (size_t i = 0; i < pl.players.size() && i < 16; ++i)
+        r.players[i] = (uintptr_t)pl.players[i];
+
+    // --- Player::m_playerIndex ---------------------------------------------
+    //
+    // PlayerList::PlayerList() doet:
+    //
+    //   for (Int i = 0; i < MAX_PLAYER_COUNT; i++)
+    //       m_players[i] = NEW Player( i );
+    //
+    // en Player::Player(Int playerIndex) zet m_playerIndex = playerIndex. Er
+    // is dus precies een offset waar bij alle zestien spelers hun eigen
+    // positie in de array staat. Zestien keer achter elkaar kloppen is geen
+    // toeval, dus deze offset is bewezen in plaats van aangenomen.
+    //
+    // Waarom we hem willen: zonder dit zegt het log alleen dat twee adressen
+    // niet gelijk zijn. Met dit zegt het welke speler de eigenaar is en welke
+    // jij bent, en dat is het verschil tussen een raadsel en een diagnose.
+    {
+        size_t n = pl.players.size();
+        if (n > 16) n = 16;
+        for (uint32_t off = 4; off < 0x80 && !r.playerIndexOffset; off += 4) {
+            size_t ok = 0;
+            for (size_t i = 0; i < n; ++i) {
+                uint32_t v = 0;
+                if (!t.r32((uint64_t)r.players[i] + off, v)) break;
+                if (v != (uint32_t)i) break;
+                ok++;
+            }
+            if (ok == n && n >= 8) r.playerIndexOffset = off;
+        }
+    }
+    if (r.playerIndexOffset) {
+        say("Player::m_playerIndex op +0x%x (zestien van de zestien kloppen)\n",
+            r.playerIndexOffset);
+    } else {
+        say("Player::m_playerIndex niet gevonden; het log kan straks geen "
+            "spelernummers noemen\n");
+    }
+    for (size_t i = 0; i < pl.players.size() && i < 16; ++i)
+        say("  speler %2zu  0x%08llx%s\n", i,
+            (unsigned long long)r.players[i],
+            (int)i == pl.localIndex ? "   <-- jij" : "");
+
     if (!findGlobalPointerNear(t, pl.addr, 0x40,
                                &r.playerListGlobal, &r.localPlayerOffset)) {
         r.error = "de globale pointer naar ThePlayerList is niet gevonden";

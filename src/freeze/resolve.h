@@ -87,6 +87,21 @@ struct Resolved {
     uint32_t damageTypeOffset = 0;
     uint32_t damageInfoInSize = 0;   // 0x18 = Generals, 0x40 = Zero Hour
 
+    // De spelers zelf, plus de offset van Player::m_playerIndex. Die offset
+    // is niet gegokt maar bewezen: ThePlayerList maakt de zestien spelers met
+    // NEW Player(i) en de constructor zet m_playerIndex = i, dus er is precies
+    // een offset waar bij elke speler zijn eigen positie in de array staat.
+    //
+    // Hiermee is in het log te zeggen WELKE speler ergens de eigenaar van is,
+    // in plaats van alleen een adres. Dat is het verschil tussen "die twee
+    // adressen zijn niet gelijk" en "de schade ging naar speler 2 en jij bent
+    // speler 4".
+    uint32_t  playerIndexOffset = 0;
+    uintptr_t players[16] = {0};
+    uint32_t  playerCount = 0;
+    int32_t   localIndex = -1;
+    uintptr_t localPlayerAtResolve = 0;
+
     // De globale pointer naar ThePlayerList, plus waar m_local daarin staat.
     // De PlayerList zelf verhuist per potje; deze globale pointer niet, dus
     // hiermee blijft de hook geldig als je een nieuw potje start.

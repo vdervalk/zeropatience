@@ -353,6 +353,36 @@ Wat de regels betekenen:
 - **geen tabel** — er is nooit schade langs de hook gekomen. Dan staan de
   hooks op de verkeerde tabellen, of er is simpelweg niet op je geschoten.
 
+### Als alles op "niet van jou" uitkomt
+
+Dan loopt de keten wel, maar komt hij nooit bij jouw speler uit. Het log
+splitst dat uit per speler:
+
+```
+[zp]   schade per speler:
+[zp]     speler 2   367    0x18f6575c
+[zp]     speler 4   0      0x190a57bc   <-- volgens ons ben jij dit
+```
+
+- **alle schade op een ander nummer, nul op dat van jou** -- er is alleen op
+  vijandelijke eenheden geschoten, of onze notie van "jij" klopt niet.
+- **schade verdeeld over meerdere nummers, maar nooit dat van jou** -- dan
+  klopt onze notie van "jij" niet.
+
+Achter *Details* staat **Beschermen**. Daar kun je dat overrulen:
+
+- *jouw speler (automatisch)* -- de standaard: de lokale speler zoals de
+  engine hem zelf kent.
+- *alle spelers (alleen als test)* -- beschermt iedereen. Gaat de teller nu
+  wel lopen, dan werkt de hook en zit de fout alleen in wie "jij" is. Je kunt
+  er niet mee spelen: de vijand is dan ook onkwetsbaar.
+- *alleen speler N* -- vast op een nummer uit de tabel hierboven.
+
+De spelernummers zelf zijn niet gegokt. `PlayerList` maakt de zestien spelers
+met `NEW Player(i)` en de constructor zet `m_playerIndex = i`, dus er is
+precies één offset waar bij alle zestien spelers hun eigen positie staat.
+Zestien keer achter elkaar kloppen is geen toeval.
+
 ### Als koppelen mislukt
 
 De trainer weigert liever dan dat hij gokt. Mislukt de afleiding, dan wordt
