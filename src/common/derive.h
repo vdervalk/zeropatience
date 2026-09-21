@@ -137,6 +137,25 @@ std::vector<HealthVtable> findHealthVtables(const Target& t,
 // potje horen objecten bij verschillende spelers. distinctPlayers is
 // daarom belangrijker dan confirmations, en localSeen bevestigt dat de
 // keten ook bij de lokale speler uitkomt.
+//
+// Spreiding alleen is niet genoeg gebleken. In een echte meting won een keten
+// die bij zes spelers uitkwam maar de verkeerde was: hij las +0x188 in
+// TeamPrototype, ergens in m_teamTemplate, en leverde onder andere de
+// waarnemer op als "eigenaar" van beschadigde objecten. De juiste keten kwam
+// niet bovendrijven omdat hij toevallig minder spelers raakte.
+//
+// Daarom nu twee structurele eisen erbij, allebei uit de broncode:
+//
+//   class Team          : public MemoryPoolObject, public Snapshot
+//   { TeamPrototype *m_proto;  ... }             -> m_proto op +0x08
+//
+//   class TeamPrototype : public MemoryPoolObject, public Snapshot
+//   { TeamFactory *m_factory; Player *m_owningPlayer; ... }
+//                                                -> m_owningPlayer op +0x0c
+//
+// Beide klassen zijn concreet, dus alle instanties delen precies een vtable.
+// Een keten die op willekeurige pointers uitkomt haalt dat niet: dan zie je
+// bij de Team- of de TeamPrototype-stap meerdere verschillende vtables.
 struct OwnerChain {
     uint32_t objectToTeam = 0;
     uint32_t teamToProto = 0;
@@ -144,6 +163,10 @@ struct OwnerChain {
     uint32_t confirmations = 0;
     uint32_t distinctPlayers = 0;
     bool     localSeen = false;
+
+    uint32_t teamVtables = 0;    // hoort 1 te zijn
+    uint32_t protoVtables = 0;   // hoort 1 te zijn
+    bool     canonical = false;  // de offsets die de broncode voorschrijft
 };
 std::vector<OwnerChain> findOwnerChains(const Target& t,
                                         const std::vector<uint64_t>& objectInstances,

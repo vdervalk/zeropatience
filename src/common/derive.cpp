@@ -256,6 +256,7 @@ std::vector<OwnerChain> findOwnerChains(const Target& t,
     struct Acc {
         uint32_t hits = 0;
         std::set<uint64_t> players;
+        std::set<uint64_t> teamVt, protoVt;
         bool local = false;
     };
     std::map<std::tuple<uint32_t, uint32_t, uint32_t>, Acc> tally;
@@ -280,6 +281,12 @@ std::vector<OwnerChain> findOwnerChains(const Target& t,
                     Acc& a = tally[{o1, o2, o3}];
                     a.hits++;
                     a.players.insert(player);
+                    // Team en TeamPrototype zijn allebei concrete klassen,
+                    // dus hun instanties delen precies een vtable. Meer dan
+                    // een betekent dat deze keten op van alles uitkomt.
+                    uint64_t tv = 0, pv = 0;
+                    if (t.rptr(team, tv) && tv) a.teamVt.insert(tv);
+                    if (t.rptr(proto, pv) && pv) a.protoVt.insert(pv);
                     if (localPlayer && player == localPlayer) a.local = true;
                 }
             }
@@ -295,20 +302,44 @@ std::vector<OwnerChain> findOwnerChains(const Target& t,
         c.confirmations = kv.second.hits;
         c.distinctPlayers = (uint32_t)kv.second.players.size();
         c.localSeen = kv.second.local;
+        c.teamVtables = (uint32_t)kv.second.teamVt.size();
+        c.protoVtables = (uint32_t)kv.second.protoVt.size();
+        c.canonical = (c.teamToProto == 2 * (uint32_t)ps) &&
+                      (c.protoToPlayer == 3 * (uint32_t)ps);
         out.push_back(c);
     }
 
-    // Spreiding weegt zwaarder dan het aantal treffers, en uitkomen bij de
-    // lokale speler weegt het zwaarst. Zonder die rangorde zijn een juiste
-    // keten en een keten die altijd de neutrale speler geeft niet te
-    // onderscheiden: beide halen het maximale aantal bevestigingen.
-    std::sort(out.begin(), out.end(), [](const OwnerChain& a, const OwnerChain& b) {
-        if (a.localSeen != b.localSeen) return a.localSeen;
+    // Rangorde, van hard naar zacht.
+    //
+    // Eerst de vorm: een keten waarvan de Team- en TeamPrototype-stap elk op
+    // precies een vtable uitkomen, leest echte objecten van die klassen. Dan
+    // de offsets die de broncode voorschrijft (m_proto op +0x08,
+    // m_owningPlayer op +0x0c). Pas daarna uitkomen bij de lokale speler,
+    // spreiding en aantal.
+    //
+    // Die volgorde is niet willekeurig. Met spreiding bovenaan won in een
+    // echte meting een keten die zes spelers raakte maar de waarnemer als
+    // eigenaar van beschadigde objecten opgaf. Vorm is niet te vervalsen,
+    // spreiding wel.
+    auto shape = [](const OwnerChain& c) {
+        int s = 0;
+        if (c.teamVtables == 1 && c.protoVtables == 1) s += 4;
+        if (c.canonical) s += 2;
+        if (c.localSeen) s += 1;
+        return s;
+    };
+    std::sort(out.begin(), out.end(), [&](const OwnerChain& a, const OwnerChain& b) {
+        const int sa = shape(a), sb = shape(b);
+        if (sa != sb) return sa > sb;
         if (a.distinctPlayers != b.distinctPlayers)
             return a.distinctPlayers > b.distinctPlayers;
         return a.confirmations > b.confirmations;
     });
-    if (out.size() > 32) out.resize(32);
+    // Ruimer bewaren dan de top. Een keten die op spreiding hoog scoort maar
+    // op vorm zakt, hoort zichtbaar te blijven: dat is precies de kandidaat
+    // die in een echte meting de verkeerde bleek, en die je in het rapport
+    // wilt terugzien in plaats van hem te moeten missen.
+    if (out.size() > 256) out.resize(256);
     return out;
 }
 
@@ -423,7 +454,11 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
     std::sort(out.begin(), out.end(), [&](const HealthBlock& a, const HealthBlock& b) {
         return quality(a) > quality(b);
     });
-    if (out.size() > 32) out.resize(32);
+    // Ruimer bewaren dan de top. Een keten die op spreiding hoog scoort maar
+    // op vorm zakt, hoort zichtbaar te blijven: dat is precies de kandidaat
+    // die in een echte meting de verkeerde bleek, en die je in het rapport
+    // wilt terugzien in plaats van hem te moeten missen.
+    if (out.size() > 256) out.resize(256);
     return out;
 }
 

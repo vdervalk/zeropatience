@@ -353,6 +353,41 @@ Wat de regels betekenen:
 - **geen tabel** — er is nooit schade langs de hook gekomen. Dan staan de
   hooks op de verkeerde tabellen, of er is simpelweg niet op je geschoten.
 
+### De eigenaarsketen: vorm boven spreiding
+
+De keten is `Object::m_team -> Team::m_proto -> TeamPrototype::m_owningPlayer`,
+precies wat `Object::getControllingPlayer()` in de engine doet. Drie onbekende
+offsets, en het eindpunt moet een speler uit `ThePlayerList` zijn.
+
+Dat eindpunt alleen is niet genoeg. Een eerdere versie koos de keten met de
+meeste **spreiding**: hoe meer verschillende spelers eruit kwamen, hoe beter.
+In een echte meting won daarmee een keten die `+0x188` in `TeamPrototype` las,
+ergens in `m_teamTemplate`. Hij kwam bij zes spelers uit, waaronder de
+*waarnemer* als eigenaar van beschadigde objecten, en de juiste keten dolf het
+onderspit omdat die toevallig minder spelers raakte.
+
+Wat de juiste keten onderscheidt is zijn **vorm**, en die staat in de
+broncode:
+
+```cpp
+class Team          : public MemoryPoolObject, public Snapshot
+{ TeamPrototype *m_proto; ... };            // -> m_proto op +0x08
+
+class TeamPrototype : public MemoryPoolObject, public Snapshot
+{ TeamFactory *m_factory; Player *m_owningPlayer; ... };
+                                            // -> m_owningPlayer op +0x0c
+```
+
+Beide klassen zijn concreet, dus **alle** instanties delen precies één vtable.
+De rangorde is daarom: eerst één vtable per stap, dan de offsets die de
+broncode voorschrijft, en pas daarna spreiding en aantal. Vorm is niet te
+vervalsen, spreiding wel.
+
+Het testdoel bevat deze valkuil nu: een lokaasketen die vier spelers raakt
+tegen drie van de echte, met wisselende vtables per stap. Onder de oude
+rangorde won het lokaas; de test controleert nu welke keten er gekozen is, niet
+of hij ergens in de tabel voorkomt.
+
 ### Wie is "jij"?
 
 Niet `m_local`, of in elk geval niet alleen. In een echte meting kwam de

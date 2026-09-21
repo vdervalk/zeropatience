@@ -16,6 +16,12 @@
 //  3. Alle zestien m_players-slots zijn gevuld, ook de ongebruikte. De
 //     scanner eiste eerder dat de achterste NULL waren en vond daardoor in
 //     een echt potje nooit een PlayerList.
+//  5. Een lokaas-eigenaarsketen die BREDER spreidt dan de echte. In een echte
+//     meting won zo'n keten: hij las een pointer diep in TeamPrototype en gaf
+//     onder andere de waarnemer op als eigenaar van beschadigde objecten,
+//     puur omdat hij meer spelers raakte dan de juiste keten. Wat hem
+//     verraadt is zijn vorm: Team en TeamPrototype zijn concrete klassen, dus
+//     elke stap hoort op precies een vtable uit te komen.
 //  4. Er is niet een body-klasse maar twee. StructureBody erft van ActiveBody
 //     en overschrijft attemptDamage niet, dus slot 0 van zijn vtable bevat
 //     hetzelfde functie-adres -- in een andere tabel. Een trainer die maar een
@@ -66,9 +72,21 @@ enum : int {
 
     PLAYER_SIZE      = 0x200,
 
+    // Lokaas: een tweede keten vanuit Object, die bij ALLE vier de spelers
+    // uitkomt terwijl de echte keten er maar drie raakt.
+    OBJECT_DECOY     = 0x0100,
+    DECOY_MID_SIZE   = 0x60,
+    DECOY_MID_NEXT   = 0x0010,
+    DECOY_PROTO_SIZE = 0x60,
+    DECOY_PROTO_OWNER= 0x0030,
+
     NUM_PLAYERS      = 4,
     LOCAL_PLAYER     = 1,
     NUM_OBJECTS      = 40,
+
+    // De echte keten raakt maar drie van de vier spelers. Zo wint het lokaas
+    // op spreiding, en moet de vorm de doorslag geven.
+    TEAMS_IN_USE     = 3,
 
     // Elk vijfde object is een "gebouw" en krijgt de StructureBody-vtables.
     STRUCTURE_EVERY  = 5,
@@ -172,6 +190,25 @@ int main() {
         teams.push_back(team);
     }
 
+    // --- lokaasketen -----------------------------------------------------
+    // Elke schakel krijgt met opzet een ANDERE vtable, want dat is precies
+    // wat een verzonnen keten in het echt ook doet: hij komt op van alles
+    // uit. De echte keten heeft per stap precies een vtable.
+    Fn* decoyVtables[] = {g_vtTeam, g_vtProto, g_vtPlayer, g_vtObject};
+    std::vector<void*> decoyProtos, decoyMids;
+    for (int i = 0; i < NUM_PLAYERS; ++i) {
+        void* dp = calloc(1, DECOY_PROTO_SIZE);
+        put(dp, 0, decoyVtables[i % 4]);
+        put(dp, DECOY_PROTO_OWNER, players[i]);
+        decoyProtos.push_back(dp);
+    }
+    for (int i = 0; i < NUM_PLAYERS; ++i) {
+        void* dm = calloc(1, DECOY_MID_SIZE);
+        put(dm, 0, decoyVtables[(i + 1) % 4]);
+        put(dm, DECOY_MID_NEXT, decoyProtos[i]);
+        decoyMids.push_back(dm);
+    }
+
     // --- objecten met body-modules ---------------------------------------
     std::vector<void*> objects;
     for (int i = 0; i < NUM_OBJECTS; ++i) {
@@ -191,7 +228,8 @@ int main() {
 
         put(obj,  OBJECT_M_BODY, iface);   // Object bewaart de subobject-pointer
         put(body, BODY_M_OBJECT, obj);     // en de module wijst terug
-        put(obj,  OBJECT_M_TEAM, teams[i % NUM_PLAYERS]);
+        put(obj,  OBJECT_M_TEAM, teams[i % TEAMS_IN_USE]);
+        put(obj,  OBJECT_DECOY,  decoyMids[i % NUM_PLAYERS]);
 
         // Drie lokaasvelden met een constante waarde.
         for (int k = 0; k < 4; ++k) {
@@ -226,6 +264,8 @@ int main() {
     printf("VERWACHT Proto::m_owner  = +0x%x\n", PROTO_M_OWNER);
     printf("VERWACHT lokale index    = %d van %d\n", LOCAL_PLAYER, NUM_PLAYERS);
     printf("VERWACHT body-klassen    = 2 (ActiveBody en StructureBody)\n");
+    printf("LOKAAS   keten           = +0x%x/+0x%x/+0x%x (4 spelers, wisselende vtables)\n",
+           OBJECT_DECOY, DECOY_MID_NEXT, DECOY_PROTO_OWNER);
     fflush(stdout);
 
     Sleep(600000);

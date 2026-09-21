@@ -146,8 +146,17 @@ check "twee body-klassen gevonden"          "$WORK/bodystat.txt" '^AANTAL=2$'
 check "twee verschillende vtables"          "$WORK/bodystat.txt" '^VTABLES=2$'
 check "een gedeeld attemptDamage"           "$WORK/bodystat.txt" '^SLOTS=1$'
 check "een ervan is de ActiveBody op naam"   "$BODIES"     'ActiveBody$'
-check "eigenaarsketen m_team +0x150"        "$REPORT"     '^\+0x150 '
-check "eigenaarsketen volledig +0x150/+0x20/+0x48" "$REPORT" '^\+0x150 +\+0x20 +\+0x48 '
+# De GEKOZEN keten, niet zomaar een regel in de tabel. Het testdoel bevat
+# met opzet een lokaasketen die breder spreidt dan de echte (vier spelers
+# tegen drie) en die het onder de oude rangorde won. Een grep over het hele
+# rapport zou daar niets van merken: beide ketens staan erin.
+grep -A1 '^Object::m_team ' "$REPORT" | tail -1 > "$WORK/chain.txt"
+check "gekozen keten is +0x150/+0x20/+0x48" "$WORK/chain.txt" \
+      '^\+0x150 +\+0x20 +\+0x48 '
+# En het lokaas moet er wel in zitten, anders stelt de controle hierboven
+# niets voor.
+check "het lokaas is gezien en afgewezen"   "$REPORT" \
+      '^BREEDSTE AFGEWEZEN: \+0x100 \+0x10 \+0x30  4 spelers'
 
 echo
 if [[ $FAILED -eq 0 ]]; then

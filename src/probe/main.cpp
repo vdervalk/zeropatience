@@ -793,18 +793,44 @@ int main(int argc, char** argv) {
                 say("Geen keten gevonden die uitkomt op een bekende Player.\n");
             } else {
                 say("\nSPELERS is het aantal verschillende spelers dat de keten\n"
-                    "oplevert. Een keten die altijd dezelfde speler geeft haalt\n"
-                    "evenveel bevestigingen als de juiste, dus spreiding weegt\n"
-                    "zwaarder, en uitkomen bij jou het zwaarst.\n\n");
-                say("%-14s %-14s %-20s %-11s %-9s %s\n",
+                    "oplevert. Maar spreiding is NIET het zwaarste criterium:\n"
+                    "in een echte meting won een keten die zes spelers raakte\n"
+                    "en toch fout was. Wat wel telt is de vorm.\n\n"
+                    "VTABLES is het aantal verschillende vtables dat de Team-\n"
+                    "en de TeamPrototype-stap opleverden. Beide klassen zijn\n"
+                    "concreet, dus dat hoort 1/1 te zijn; alles daarboven\n"
+                    "betekent dat de keten op van alles uitkomt.\n\n"
+                    "BRON betekent dat de offsets zijn wat de broncode\n"
+                    "voorschrijft: Team::m_proto op +0x08 en\n"
+                    "TeamPrototype::m_owningPlayer op +0x0c, want beide\n"
+                    "klassen erven van MemoryPoolObject en Snapshot.\n\n");
+                say("%-14s %-14s %-20s %-10s %-8s %-8s %-5s %s\n",
                     "Object::m_team", "Team::m_proto", "Proto::m_owningPlayer",
-                    "BEVESTIGD", "SPELERS", "JIJ EROP");
-                for (const OwnerChain& c : chains)
-                    say("+0x%-11x +0x%-11x +0x%-17x %-11u %-9u %s\n",
+                    "BEVESTIGD", "SPELERS", "VTABLES", "BRON", "JIJ EROP");
+                size_t shown = 0;
+                for (const OwnerChain& c : chains) {
+                    if (++shown > 24) break;
+                    say("+0x%-11x +0x%-11x +0x%-17x %-10u %-8u %u/%-6u %-5s %s\n",
                         c.objectToTeam, c.teamToProto, c.protoToPlayer,
                         c.confirmations, c.distinctPlayers,
+                        c.teamVtables, c.protoVtables,
+                        c.canonical ? "ja" : "nee",
                         c.localSeen ? "ja" : "nee");
+                }
                 say("\nDe bovenste regel is de keten die de hook gaat gebruiken.\n");
+
+                // De breedste keten die het NIET werd. Dit is de regel die
+                // laat zien of er een lokaas was en waarop het afviel.
+                const OwnerChain* widest = nullptr;
+                for (size_t i = 1; i < chains.size(); ++i)
+                    if (!widest || chains[i].distinctPlayers > widest->distinctPlayers)
+                        widest = &chains[i];
+                if (widest && widest->distinctPlayers >= chains[0].distinctPlayers)
+                    say("BREEDSTE AFGEWEZEN: +0x%x +0x%x +0x%x  %u spelers, "
+                        "vtables %u/%u\n",
+                        widest->objectToTeam, widest->teamToProto,
+                        widest->protoToPlayer, widest->distinctPlayers,
+                        widest->teamVtables, widest->protoVtables);
             }
         }
     }

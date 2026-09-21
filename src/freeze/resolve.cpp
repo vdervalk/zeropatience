@@ -536,6 +536,22 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
     say("eigenaarsketen +0x%x / +0x%x / +0x%x, %u spelers\n",
         r.objectToTeam, r.teamToProto, r.protoToPlayer, r.chainPlayers);
 
+    // De alternatieven erbij, zodat een verkeerde keuze te zien is in plaats
+    // van alleen te merken. De vorm staat erbij: "vorm" betekent dat de Team-
+    // en TeamPrototype-stap elk op precies een vtable uitkwamen, "bron" dat
+    // de offsets zijn wat de broncode voorschrijft.
+    for (size_t i = 0; i < chains.size() && i < 4; ++i) {
+        const OwnerChain& c = chains[i];
+        say("  %s +0x%-4x +0x%-3x +0x%-4x  %u spelers, %u treffers, "
+            "vtables %u/%u%s%s%s\n",
+            i == 0 ? "gekozen" : "       ",
+            c.objectToTeam, c.teamToProto, c.protoToPlayer,
+            c.distinctPlayers, c.confirmations, c.teamVtables, c.protoVtables,
+            c.canonical ? ", bron" : "",
+            (c.teamVtables == 1 && c.protoVtables == 1) ? ", vorm" : "",
+            c.localSeen ? ", jij erbij" : "");
+    }
+
     r.ok = true;
     return r;
 }
