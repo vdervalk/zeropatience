@@ -332,6 +332,41 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
     };
     std::map<int32_t, Acc> tally;
 
+    // De stap tussen twee opeenvolgende instanties. Een geheugenpool geeft
+    // blokken van vaste grootte uit, dus die stap is de grootte van het
+    // object.
+    //
+    // Dat getal is nodig, want dezelfde vier floats zijn ook vanuit de buurman
+    // te lezen: op de echte offset plus de stap. Zo'n schaduw haalt bijna
+    // evenveel treffers als het echte veld en soms meer variatie, omdat hij in
+    // objecten van gemengde klassen kijkt. In het testdoel verdrong de echo op
+    // +0x250 het echte veld op +0x30. Wat de schaduw verraadt is zijn afstand:
+    // hij ligt een heel object verderop, en daar staat per definitie geen veld
+    // van dit object meer.
+    //
+    // De meest voorkomende afstand, niet de kleinste: tussen de instanties
+    // zitten ook verwijzingen uit het image, en die liggen willekeurig dicht
+    // bij elkaar. Minstens drie keer dezelfde afstand, anders is er te weinig
+    // houvast en filteren we niet.
+    {
+        std::vector<uint64_t> sorted = bodyObjects;
+        std::sort(sorted.begin(), sorted.end());
+        std::map<uint64_t, uint32_t> diffs;
+        for (size_t i = 1; i < sorted.size(); ++i) {
+            const uint64_t d = sorted[i] - sorted[i - 1];
+            if (d >= 0x40) diffs[d]++;
+        }
+        uint64_t stride = 0;
+        uint32_t bestCount = 0;
+        for (const auto& kv : diffs)
+            if (kv.second > bestCount) { bestCount = kv.second; stride = kv.first; }
+        if (bestCount >= 3 && stride < 0x40000) {
+            const int32_t lim = (int32_t)stride;
+            if (toOffset > lim)    toOffset = lim;
+            if (fromOffset < -lim) fromOffset = -lim;
+        }
+    }
+
     for (uint64_t body : bodyObjects) {
         for (int32_t off = fromOffset; off + 16 <= toOffset; off += 4) {
             const uint64_t a = (uint64_t)((int64_t)body + off);
@@ -492,6 +527,41 @@ static std::vector<uint64_t> imageFindBytes(const Target& t,
                 hits.push_back(s.base + i);
     }
     return hits;
+}
+
+std::vector<BodyVtableHit> findBodyVtables(const Target& t,
+                                           const std::vector<uint64_t>& objectInstances,
+                                           uint32_t objectToBody,
+                                           int32_t thisToObject) {
+    std::map<uint64_t, uint32_t> found;
+    for (uint64_t obj : objectInstances) {
+        uint64_t body = 0;
+        if (!t.rptr(obj + objectToBody, body) || !body) continue;
+        uint64_t back = 0;
+        if (!t.rptr((uint64_t)((int64_t)body + thisToObject), back)) continue;
+        if (back != obj) continue;            // geen sluitende dubbele link
+        uint64_t vt = 0;
+        if (!t.rptr(body, vt) || !vt) continue;
+        uint64_t slot = 0;
+        if (!t.rptr(vt, slot) || !t.isExecutable(slot)) continue;
+        found[vt]++;
+    }
+
+    std::vector<BodyVtableHit> out;
+    for (const auto& kv : found) {
+        BodyVtableHit h;
+        h.vtable = kv.first;
+        h.confirmations = kv.second;
+        t.rptr(kv.first, h.slot0);
+        out.push_back(h);
+    }
+    std::sort(out.begin(), out.end(),
+              [](const BodyVtableHit& a, const BodyVtableHit& b) {
+                  if (a.confirmations != b.confirmations)
+                      return a.confirmations > b.confirmations;
+                  return a.vtable < b.vtable;
+              });
+    return out;
 }
 
 std::vector<NameAnchor> findNameAnchors(const Target& t,

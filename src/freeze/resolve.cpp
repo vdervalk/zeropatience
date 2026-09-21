@@ -159,6 +159,7 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
         r.bodyVtable          = (uintptr_t)c.vtable;
         r.objectVtable        = (uintptr_t)linkVtable[best->first];
         r.thisToObject        = best->first.first;
+        r.objectToBody        = best->first.second;
         r.healthOffset        = health->offset;
         r.healthConfirmations = health->confirmations;
         r.linkConfirmations   = best->second;
@@ -245,9 +246,108 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
     }
     r.attemptDamage = (uintptr_t)slot0;
 
-    say("ActiveBody-vtable 0x%llx, this->Object %d, hitpoints +0x%x\n",
+    say("ActiveBody-vtable 0x%llx, this->Object %d, Object->body +0x%x, "
+        "hitpoints +0x%x\n",
         (unsigned long long)r.bodyVtable, (int)r.thisToObject,
-        (unsigned)r.healthOffset);
+        (unsigned)r.objectToBody, (unsigned)r.healthOffset);
+
+    // --- de overige body-klassen -------------------------------------------
+    //
+    // Er is niet een body-klasse maar zeven, elk met een eigen vtable:
+    //
+    //   ActiveBody
+    //     StructureBody          (alle gebouwen)
+    //       HiveStructureBody
+    //     UndeadBody
+    //     HighlanderBody
+    //     ImmortalBody
+    //   InactiveBody
+    //
+    // StructureBody en ImmortalBody overschrijven attemptDamage niet. In hun
+    // vtable staat dus hetzelfde functie-adres als in die van ActiveBody, maar
+    // het is wel een andere tabel. Een hook op slot 0 van de ene tabel raakt
+    // de andere niet.
+    //
+    // Dat is de verklaring voor "werkt de ene keer wel en de andere keer
+    // niet": de vorige versie hookte precies een tabel, namelijk de eerste
+    // kandidaat die de poolnaam opleverde. Viel die keuze op ActiveBody, dan
+    // waren je eenheden beschermd en je gebouwen niet; viel hij op
+    // StructureBody, dan andersom.
+    //
+    // We zoeken ze niet op naam op. Dat hoeft niet, want we kennen de dubbele
+    // link al: neem een Object, lees op +objectToBody zijn body-module, lees
+    // daar de vptr, en controleer dat die module op thisToObject terugwijst
+    // naar datzelfde Object. Wat daar uitkomt is per definitie een body-vtable
+    // met het juiste subobject; er valt niets te gokken. Een naam hoort er dan
+    // ook niet bij, behalve bij de ene vtable die de resolutie hierboven al op
+    // naam heeft aangewezen -- zie derive.h.
+
+    // Een ruime steekproef Objecten. Die dient hier twee doelen: de
+    // body-klassen hieronder en straks de eigenaarsketen. Een keer scannen is
+    // genoeg, en ruim bemonsteren is nodig -- gebouwen zijn met veel minder
+    // dan eenheden, en als er geen enkel gebouw in de steekproef zit vinden we
+    // StructureBody niet.
+    std::vector<uint64_t> objects = instancesOf(t, r.objectVtable, 512, true);
+
+    {
+        std::vector<BodyVtableHit> hits =
+            findBodyVtables(t, objects, r.objectToBody, r.thisToObject);
+
+        // ActiveBody voorop, de rest op aantal bevestigingen. Voorop omdat
+        // dat de klasse is die hierboven al op drie manieren bevestigd is;
+        // raakt de lijst vol, dan valt die er niet als eerste af.
+        std::stable_sort(hits.begin(), hits.end(),
+                         [&](const BodyVtableHit& x, const BodyVtableHit& y) {
+                             return (x.vtable == r.bodyVtable) >
+                                    (y.vtable == r.bodyVtable);
+                         });
+
+        say("body-klassen met een sluitende dubbele link: %zu\n", hits.size());
+        for (const BodyVtableHit& h : hits) {
+            if (r.bodies.size() >= ZP_MAX_BODY_VTABLES) {
+                say("  (meer dan %u; de rest blijft ongehookt)\n",
+                    (unsigned)ZP_MAX_BODY_VTABLES);
+                break;
+            }
+            // Twee bevestigingen is al zo goed als onvervalsbaar: het adres
+            // moet heen en terug kloppen. Een enkele treffer kan nog een
+            // restant van een vrijgegeven object zijn, dus daar houden we op.
+            if (h.confirmations < 2 && h.vtable != r.bodyVtable) {
+                say("  0x%-8llx  %u bevestiging, te weinig\n",
+                    (unsigned long long)h.vtable, h.confirmations);
+                continue;
+            }
+            BodyVtable b;
+            b.vtable        = (uintptr_t)h.vtable;
+            b.attemptDamage = (uintptr_t)h.slot0;
+            b.confirmations = h.confirmations;
+            b.nameConfirmed = h.vtable == r.bodyVtable;
+            auto it = counts.find(h.vtable);
+            b.instances     = it == counts.end() ? 0 : (uint32_t)it->second;
+            say("  0x%-8llx  %4u bevestigingen, %5u instanties, "
+                "slot 0 -> 0x%llx%s\n",
+                (unsigned long long)b.vtable, b.confirmations, b.instances,
+                (unsigned long long)b.attemptDamage,
+                b.nameConfirmed ? "  <-- ActiveBody, op naam bevestigd" : "");
+            r.bodies.push_back(b);
+        }
+
+        // ActiveBody hoort er altijd bij: die is hierboven al op drie manieren
+        // bevestigd. Stond hij niet in de steekproef, dan alsnog vooraan.
+        bool hasPrimary = false;
+        for (const BodyVtable& b : r.bodies)
+            if (b.vtable == r.bodyVtable) hasPrimary = true;
+        if (!hasPrimary) {
+            BodyVtable b;
+            b.vtable        = r.bodyVtable;
+            b.attemptDamage = r.attemptDamage;
+            b.confirmations = r.linkConfirmations;
+            b.instances     = (uint32_t)r.bodyInstances;
+            b.nameConfirmed = true;
+            r.bodies.insert(r.bodies.begin(), b);
+            if (r.bodies.size() > ZP_MAX_BODY_VTABLES) r.bodies.resize(ZP_MAX_BODY_VTABLES);
+        }
+    }
 
     // --- ThePlayerList -----------------------------------------------------
     std::vector<PlayerListHit> pls = findPlayerLists(t);
@@ -273,7 +373,6 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
     // eenheden toevallig niets in de steekproef zit. De extra kosten vallen
     // mee: de dure lussen draaien alleen op offsets waar echt een object
     // staat.
-    std::vector<uint64_t> objects = instancesOf(t, r.objectVtable, 256, true);
     std::vector<OwnerChain> chains =
         findOwnerChains(t, objects, pl.players, pl.localPlayer, 0x400, 0x80, 0x200);
     if (chains.empty() || !chains[0].localSeen || chains[0].distinctPlayers < 2) {

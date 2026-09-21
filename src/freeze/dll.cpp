@@ -16,6 +16,13 @@
 // De hook zit in de vtable, niet in de code. Een vtable-slot is een pointer
 // op een bekend adres: schrijven om aan te zetten, terugzetten om uit te
 // zetten. Geen instructies decoderen, geen halve instructie overschreven.
+//
+// Het zijn meerdere vtables, geen een. De engine heeft zeven body-klassen en
+// elke klasse heeft zijn eigen tabel, ook als hij attemptDamage helemaal niet
+// overschrijft: StructureBody (alle gebouwen) erft die functie van ActiveBody,
+// dus het functie-adres is hetzelfde maar de tabel niet. Wie een tabel hookte,
+// beschermde de helft van wat hij bezat -- en welke helft hing af van welke
+// kandidaat de zoektocht toevallig als eerste opleverde.
 
 #include "resolve.h"
 #include "../common/shared.h"
@@ -62,10 +69,26 @@ static void setState(uint32_t st) {
     if (g_shared) g_shared->state = st;
 }
 
+// Een thunk per gehookte vtable, elk met zijn eigen bewaarde origineel.
+//
+// Dat is niet uit weelde. ActiveBody en StructureBody delen hetzelfde
+// attemptDamage-adres, maar HighlanderBody, UndeadBody en HiveStructureBody
+// hebben elk een eigen versie. Met een enkele g_original zou de tweede hook
+// het origineel van de eerste overschrijven, en dan roept de ene klasse de
+// attemptDamage van de andere aan. Dat is precies het soort fout dat pas
+// later en ergens anders opvalt.
+//
+// De thunks zijn statisch gegenereerde code, geen zelf geschreven bytes: de
+// assembler maakt ze, de linker plaatst ze, en er komt geen uitvoerbaar
+// geheugen aan te pas dat we zelf alloceren.
+#define ZP_ORIGINALS(X) X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7)
+
 extern "C" {
-void* g_original = nullptr;             // de echte attemptDamage
+#define ZP_DECL(n) void* g_original_##n = nullptr; void zp_detour_##n();
+ZP_ORIGINALS(ZP_DECL)
+#undef ZP_DECL
+
 int   zp_should_block(void* self, void* damageInfo);
-void  zp_detour();                      // gedefinieerd in assembly, hieronder
 
 // Alleen voor de zelfcontrole van de thunk, hieronder.
 int   g_forceBlock = 0;
@@ -75,6 +98,14 @@ int   g_testCalls = 0;
 void  zp_test_original();
 int   zp_test_call(void* fn, void* self, void* di);
 }
+
+#define ZP_ENTRY(n) (void*)&zp_detour_##n,
+static void* const kDetour[ZP_MAX_BODY_VTABLES] = { ZP_ORIGINALS(ZP_ENTRY) };
+#undef ZP_ENTRY
+
+#define ZP_SLOT(n) &g_original_##n,
+static void** const kOriginal[ZP_MAX_BODY_VTABLES] = { ZP_ORIGINALS(ZP_SLOT) };
+#undef ZP_SLOT
 
 static void logf(const char* fmt, ...) {
     char buf[1024];
@@ -108,26 +139,30 @@ static void logf(const char* fmt, ...) {
 // callee ruimt dat argument op (ret 4). GCC kent geen naked functies op x86,
 // dus de omweg staat in een assembly-blok. Zo is er geen twijfel over wat de
 // compiler ervan maakt.
+#define ZP_THUNK(n)                                                           \
+    ".globl _zp_detour_" #n "\n"                                              \
+    "_zp_detour_" #n ":\n"                                                    \
+    "  pushl %ebp\n"                                                          \
+    "  movl  %esp, %ebp\n"                                                    \
+    "  pushl %ecx\n"                  /* this bewaren; de call klobbert ecx */\
+    "  pushl 8(%ebp)\n"               /* damageInfo */                        \
+    "  pushl %ecx\n"                  /* this */                              \
+    "  call  _zp_should_block\n"                                              \
+    "  addl  $8, %esp\n"                                                      \
+    "  movl  -4(%ebp), %ecx\n"        /* this herstellen */                   \
+    "  testl %eax, %eax\n"                                                    \
+    "  jnz   1f\n"                                                            \
+    "  pushl 8(%ebp)\n"               /* doorgeven aan het origineel */       \
+    "  call  *_g_original_" #n "\n"   /* dat doet zelf ret 4 */               \
+    "1:\n"                                                                    \
+    "  movl  %ebp, %esp\n"                                                    \
+    "  popl  %ebp\n"                                                          \
+    "  ret   $4\n"
+
 __asm__(
     ".text\n"
-    ".globl _zp_detour\n"
-    "_zp_detour:\n"
-    "  pushl %ebp\n"
-    "  movl  %esp, %ebp\n"
-    "  pushl %ecx\n"                  /* this bewaren; de call hieronder klobbert ecx */
-    "  pushl 8(%ebp)\n"               /* damageInfo */
-    "  pushl %ecx\n"                  /* this */
-    "  call  _zp_should_block\n"
-    "  addl  $8, %esp\n"
-    "  movl  -4(%ebp), %ecx\n"        /* this herstellen */
-    "  testl %eax, %eax\n"
-    "  jnz   1f\n"
-    "  pushl 8(%ebp)\n"               /* niet geblokkeerd: doorgeven aan het origineel */
-    "  call  *_g_original\n"          /* dat doet zelf ret 4 */
-    "1:\n"
-    "  movl  %ebp, %esp\n"
-    "  popl  %ebp\n"
-    "  ret   $4\n"
+    ZP_THUNK(0) ZP_THUNK(1) ZP_THUNK(2) ZP_THUNK(3)
+    ZP_THUNK(4) ZP_THUNK(5) ZP_THUNK(6) ZP_THUNK(7)
 );
 
 // ------------------------------------------------- zelfcontrole van de thunk --
@@ -171,55 +206,63 @@ __asm__(
     "  ret\n"
 );
 
-// Probeert de thunk uit met een nep-origineel. Geeft true als zowel het
+// Probeert de thunks uit met een nep-origineel. Geeft true als zowel het
 // doorgeven als het blokkeren klopt en de stack in beide gevallen terecht is.
+//
+// Alle acht worden getest, niet alleen de eerste. Ze komen uit dezelfde macro
+// en zijn dus per constructie gelijk, maar wat hier fout kan gaan is juist de
+// koppeling tussen thunk n en g_original_n -- en dat is precies wat een test
+// van alleen nummer nul niet ziet.
 static bool selfCheckThunk() {
-    void* savedOriginal = g_original;
     const bool savedEnabled = g_enabled;
-
-    char fakeSelf[64] = {0};
-    char fakeDi[16] = {0};
     bool good = true;
 
-    g_original = (void*)&zp_test_original;
+    for (uint32_t i = 0; i < ZP_MAX_BODY_VTABLES; ++i) {
+        char fakeSelf[64] = {0};
+        char fakeDi[16] = {0};
 
-    // Geval 1: niet blokkeren, dus doorgeven aan het origineel.
-    g_enabled = false;
-    g_forceBlock = 0;
-    g_testCalls = 0;
-    g_testThis = nullptr;
-    g_testDi = nullptr;
-    int drift = zp_test_call((void*)&zp_detour, fakeSelf, fakeDi);
-    if (drift != 0) {
-        logf("[zp] thunk-controle: stack verschoof %d bytes bij doorgeven\n", drift);
-        good = false;
-    }
-    if (g_testCalls != 1) {
-        logf("[zp] thunk-controle: origineel %d keer aangeroepen, verwacht 1\n",
-             g_testCalls);
-        good = false;
-    }
-    if (g_testThis != fakeSelf || g_testDi != fakeDi) {
-        logf("[zp] thunk-controle: this of argument kwam verkeerd door\n");
-        good = false;
+        void* savedOriginal = *kOriginal[i];
+        *kOriginal[i] = (void*)&zp_test_original;
+
+        // Geval 1: niet blokkeren, dus doorgeven aan het origineel.
+        g_enabled = false;
+        g_forceBlock = 0;
+        g_testCalls = 0;
+        g_testThis = nullptr;
+        g_testDi = nullptr;
+        int drift = zp_test_call(kDetour[i], fakeSelf, fakeDi);
+        if (drift != 0) {
+            logf("[zp] thunk %u: stack verschoof %d bytes bij doorgeven\n", i, drift);
+            good = false;
+        }
+        if (g_testCalls != 1) {
+            logf("[zp] thunk %u: origineel %d keer aangeroepen, verwacht 1\n",
+                 i, g_testCalls);
+            good = false;
+        }
+        if (g_testThis != fakeSelf || g_testDi != fakeDi) {
+            logf("[zp] thunk %u: this of argument kwam verkeerd door\n", i);
+            good = false;
+        }
+
+        // Geval 2: blokkeren, dus het origineel niet aanroepen.
+        g_enabled = true;
+        g_forceBlock = 1;
+        g_testCalls = 0;
+        drift = zp_test_call(kDetour[i], fakeSelf, fakeDi);
+        if (drift != 0) {
+            logf("[zp] thunk %u: stack verschoof %d bytes bij blokkeren\n", i, drift);
+            good = false;
+        }
+        if (g_testCalls != 0) {
+            logf("[zp] thunk %u: origineel werd toch aangeroepen\n", i);
+            good = false;
+        }
+
+        g_forceBlock = 0;
+        *kOriginal[i] = savedOriginal;
     }
 
-    // Geval 2: blokkeren, dus het origineel niet aanroepen.
-    g_enabled = true;
-    g_forceBlock = 1;
-    g_testCalls = 0;
-    drift = zp_test_call((void*)&zp_detour, fakeSelf, fakeDi);
-    if (drift != 0) {
-        logf("[zp] thunk-controle: stack verschoof %d bytes bij blokkeren\n", drift);
-        good = false;
-    }
-    if (g_testCalls != 0) {
-        logf("[zp] thunk-controle: origineel werd toch aangeroepen\n");
-        good = false;
-    }
-
-    g_forceBlock = 0;
-    g_original = savedOriginal;
     g_enabled = savedEnabled;
     return good;
 }
@@ -313,24 +356,59 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
 
 // ----------------------------------------------------------------- de hook --
 
-static bool installHook() {
-    void** slot = (void**)g_r.bodyVtable;     // attemptDamage is slot 0
-    DWORD prot = 0;
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &prot)) return false;
-    g_original = *slot;
-    *slot = (void*)&zp_detour;
-    VirtualProtect(slot, sizeof(void*), prot, &prot);
-    FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
-    return true;
+// Wat er per gehookte vtable te onthouden valt om hem terug te kunnen zetten.
+struct Patch {
+    void** slot = nullptr;      // &vtable[0]
+    void*  original = nullptr;  // wat daar stond
+    void*  detour = nullptr;    // wat wij erin zetten
+    bool   named = false;       // dit is de op naam bevestigde ActiveBody
+};
+static Patch    g_patch[ZP_MAX_BODY_VTABLES];
+static uint32_t g_patchCount = 0;
+
+// Plaatst een hook op slot 0 van elke bevestigde body-vtable. Geeft terug
+// hoeveel er gelukt zijn; nul betekent mislukt.
+static uint32_t installHooks() {
+    g_patchCount = 0;
+    for (const BodyVtable& b : g_r.bodies) {
+        if (g_patchCount >= ZP_MAX_BODY_VTABLES) break;
+        const uint32_t i = g_patchCount;
+        void** slot = (void**)b.vtable;
+
+        DWORD prot = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &prot)) {
+            logf("[zp] 0x%08x: slot niet schrijfbaar, overgeslagen\n",
+                 (unsigned)b.vtable);
+            continue;
+        }
+        *kOriginal[i] = *slot;
+        *slot = kDetour[i];
+        VirtualProtect(slot, sizeof(void*), prot, &prot);
+
+        g_patch[i].slot     = slot;
+        g_patch[i].original = *kOriginal[i];
+        g_patch[i].detour   = kDetour[i];
+        g_patch[i].named    = b.nameConfirmed;
+        g_patchCount++;
+    }
+    if (g_patchCount) FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
+    return g_patchCount;
 }
 
 static void removeHook() {
-    if (!g_hooked || !g_original) return;
-    void** slot = (void**)g_r.bodyVtable;
-    DWORD prot = 0;
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &prot)) return;
-    *slot = g_original;
-    VirtualProtect(slot, sizeof(void*), prot, &prot);
+    if (!g_hooked) return;
+    for (uint32_t i = 0; i < g_patchCount; ++i) {
+        Patch& p = g_patch[i];
+        if (!p.slot || !p.original) continue;
+        DWORD prot = 0;
+        if (!VirtualProtect(p.slot, sizeof(void*), PAGE_READWRITE, &prot)) continue;
+        // Alleen terugzetten als onze detour er nog staat. Zit er intussen
+        // iets anders, dan is dat van iemand anders en blijft het van hem.
+        if (*p.slot == p.detour) *p.slot = p.original;
+        VirtualProtect(p.slot, sizeof(void*), prot, &prot);
+        p.slot = nullptr;
+    }
+    g_patchCount = 0;
     g_hooked = false;
 }
 
@@ -351,8 +429,12 @@ static void status() {
     logf("[zp] onkwetsbaarheid: %s\n", g_enabled ? "AAN" : "uit");
     logf("[zp] hook geplaatst : %s\n", g_hooked ? "ja" : "nee");
     if (!g_r.ok) return;
-    logf("[zp] vtable          0x%08x  (slot 0 -> 0x%08x)\n",
-         (unsigned)g_r.bodyVtable, (unsigned)g_r.attemptDamage);
+    logf("[zp] gehookte klassen: %u\n", g_patchCount);
+    for (uint32_t i = 0; i < g_patchCount; ++i)
+        logf("[zp]   0x%08x  slot 0 -> 0x%08x%s\n",
+             (unsigned)(uintptr_t)g_patch[i].slot,
+             (unsigned)(uintptr_t)g_patch[i].original,
+             g_patch[i].named ? "  (ActiveBody, op naam bevestigd)" : "");
     logf("[zp] this -> Object  %s0x%x\n",
          g_r.thisToObject < 0 ? "-" : "+",
          (unsigned)(g_r.thisToObject < 0 ? -g_r.thisToObject : g_r.thisToObject));
@@ -394,11 +476,12 @@ static bool attachOnce() {
     }
 
     logf("\n[zp] gelukt. Bewijs: %u hitpoint-bevestigingen, %u link-bevestigingen,\n"
-         "[zp] keten over %u spelers.\n\n",
-         g_r.healthConfirmations, g_r.linkConfirmations, g_r.chainPlayers);
+         "[zp] keten over %u spelers, %zu body-klassen.\n\n",
+         g_r.healthConfirmations, g_r.linkConfirmations, g_r.chainPlayers,
+         g_r.bodies.size());
 
-    if (!installHook()) {
-        logf("[zp] MISLUKT: kan het vtable-slot niet schrijven\n");
+    if (!installHooks()) {
+        logf("[zp] MISLUKT: kan geen enkel vtable-slot schrijven\n");
         setState(STATE_FAILED);
         return false;
     }

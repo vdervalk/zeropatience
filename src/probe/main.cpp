@@ -708,6 +708,40 @@ int main(int argc, char** argv) {
                                          : "NEE -- dit is verdacht");
     }
 
+    // ----------------------------------------------------------- body-klassen --
+    //
+    // Er is niet een body-klasse maar zeven. StructureBody (alle gebouwen) en
+    // ImmortalBody overschrijven attemptDamage niet, dus hun vtable bevat
+    // hetzelfde functie-adres als die van ActiveBody -- maar het is een andere
+    // tabel, en een hook op slot 0 van de ene raakt de andere niet. De trainer
+    // moet ze dus allemaal hooken, en dit is de meting die dat onderbouwt.
+    if (resolvedObjectVtable && resolvedObjectToBody) {
+        rule("BODY-KLASSEN");
+        std::vector<uint64_t> objs = instancesOf(t, resolvedObjectVtable, 512, true);
+        std::vector<BodyVtableHit> hits =
+            findBodyVtables(t, objs, (uint32_t)resolvedObjectToBody,
+                            resolvedThisToObject);
+
+        say("%zu Objecten bemonsterd, %zu body-vtables met een sluitende "
+            "dubbele link\n\n", objs.size(), hits.size());
+        say("  %-12s %-14s %-24s %s\n",
+            "VTABLE", "BEVESTIGINGEN", "SLOT 0 (attemptDamage)", "OP NAAM");
+        for (const BodyVtableHit& h : hits)
+            say("  0x%-10llx %-14u 0x%-22llx %s\n",
+                (unsigned long long)h.vtable, h.confirmations,
+                (unsigned long long)h.slot0,
+                h.vtable == resolvedBodyVtable ? "ActiveBody" : "-");
+        say("\nDe dubbele link is het bewijs: elk Object wijst op +0x%x naar zijn\n"
+            "body-module, en die module wijst op %s terug naar datzelfde Object.\n"
+            "\nEen poolnaam staat er alleen bij de vtable die de resolutie op naam\n"
+            "heeft aangewezen. De andere body-klassen zijn met de naamzoektocht\n"
+            "niet uit elkaar te houden: hun vtables liggen in de binary vlak bij\n"
+            "elkaar, dus de straal rond de ene naam vangt ook de andere vtable.\n"
+            "Voor het hooken maakt dat niets uit -- de dubbele link volstaat --\n"
+            "en een verzonnen naam zou alleen maar misleiden.\n",
+            (unsigned)resolvedObjectToBody, soff(resolvedThisToObject).c_str());
+    }
+
     // ------------------------------------------------- ActiveBody-instanties --
     std::vector<uint64_t> bodyInstances;
     if (resolvedBodyVtable) {
@@ -719,10 +753,11 @@ int main(int argc, char** argv) {
         if (hb.empty()) {
             say("Niets gevonden.\n");
         } else {
-            say("%-12s %-14s %-12s %s\n", "OFFSET", "BEVESTIGD", "current", "max");
+            say("%-12s %-12s %-10s %-12s %s\n",
+                "OFFSET", "BEVESTIGD", "VARIATIE", "current", "max");
             for (const HealthBlock& b : hb)
-                say("%-12s %-14u %-12.1f %.1f\n",
-                    soff(b.offset).c_str(), b.confirmations,
+                say("%-12s %-12u %-10u %-12.1f %.1f\n",
+                    soff(b.offset).c_str(), b.confirmations, b.distinctMax,
                     b.sampleCurrent, b.sampleMax);
         }
 

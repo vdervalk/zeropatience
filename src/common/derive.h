@@ -174,6 +174,47 @@ std::vector<HealthBlock> findHealthBlocks(const Target& t,
                                           int32_t fromOffset,
                                           int32_t toOffset);
 
+// --- alle body-klassen vinden ------------------------------------------
+//
+// Er is niet een body-klasse maar zeven, elk met een eigen vtable:
+//
+//   ActiveBody
+//     StructureBody          (alle gebouwen)
+//       HiveStructureBody
+//     UndeadBody
+//     HighlanderBody
+//     ImmortalBody
+//   InactiveBody
+//
+// StructureBody en ImmortalBody overschrijven attemptDamage niet. In hun
+// vtable staat dus hetzelfde functie-adres als in die van ActiveBody, maar het
+// blijft een andere tabel: een hook op slot 0 van de ene raakt de andere niet.
+//
+// Zoeken hoeft niet op naam en niet op statistiek. Zodra de dubbele link
+// bekend is (Object::m_body en, vanaf de module, m_object) lever je hem
+// gewoon een steekproef Objecten aan: lees per Object zijn body-module, lees
+// daar de vptr, en controleer dat die module terugwijst naar datzelfde Object.
+// Wat overblijft is per definitie een body-vtable met het juiste subobject.
+struct BodyVtableHit {
+    uint64_t vtable = 0;
+    uint64_t slot0 = 0;          // attemptDamage
+    uint32_t confirmations = 0;  // Objecten waarbij de link heen en terug klopt
+};
+std::vector<BodyVtableHit> findBodyVtables(const Target& t,
+                                           const std::vector<uint64_t>& objectInstances,
+                                           uint32_t objectToBody,
+                                           int32_t thisToObject);
+
+// Poolnamen erbij zetten kan niet betrouwbaar, en dat is hier bewust
+// weggelaten. De naamzoektocht levert per naam de vtables op die binnen een
+// straal van de verwijzing liggen, en twee body-klassen liggen in de binary
+// vlak bij elkaar: in een meting stond de vtable van de ene klasse dichter bij
+// de naam van de andere dan bij zijn eigen. Welke vtable bij welke naam hoort
+// is daarmee niet vast te stellen, en een verkeerd label is erger dan geen
+// label. Wat we wel weten is welke vtable op naam bevestigd is (dat is de
+// ActiveBody uit de resolutie); de rest herkennen we aan de dubbele link, en
+// die is voor het hooken het enige dat telt.
+
 // --- klassen op naam aanwijzen -----------------------------------------
 //
 // De engine registreert elke pool onder een naam:

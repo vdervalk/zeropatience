@@ -84,7 +84,19 @@ echo
 # exact op gecontroleerd; elders in het rapport staan ook kandidaten, en een
 # losse grep zou daar ten onrechte op aanslaan.
 RESOLUTION="$WORK/resolution.txt"
-sed -n '/^  RESOLUTIE$/,/^  GEZONDHEIDSVELDEN/p' "$REPORT" > "$RESOLUTION"
+sed -n '/^  RESOLUTIE$/,/^  BODY-KLASSEN/p' "$REPORT" > "$RESOLUTION"
+
+# De body-klassen apart. Het testdoel bouwt er twee: ActiveBody en
+# StructureBody, met eigen vtables maar hetzelfde attemptDamage in slot 0.
+# Dat is precies de situatie waarin een trainer die een tabel hookt de helft
+# mist, dus die meting hoort hier gecontroleerd te worden.
+BODIES="$WORK/bodies.txt"
+sed -n '/^  BODY-KLASSEN$/,/^  GEZONDHEIDSVELDEN/p' "$REPORT" > "$BODIES"
+{
+    echo "AANTAL=$(grep -cE '^  0x' "$BODIES")"
+    echo "VTABLES=$(grep -E '^  0x' "$BODIES" | awk '{print $1}' | sort -u | wc -l)"
+    echo "SLOTS=$(grep -E '^  0x' "$BODIES" | awk '{print $3}' | sort -u | wc -l)"
+} > "$WORK/bodystat.txt"
 
 # De dubbelgelinkte objectlijst in het testdoel is de valkuil die de echte
 # meting liet mislukken: toen kwamen ActiveBody en Object op dezelfde vtable
@@ -130,6 +142,10 @@ else
     echo "NAAM_WIJKT_AF $AB" > "$WORK/named.txt"
 fi
 check "poolnaam wijst dezelfde vtable aan"  "$WORK/named.txt" 'NAAM_KLOPT'
+check "twee body-klassen gevonden"          "$WORK/bodystat.txt" '^AANTAL=2$'
+check "twee verschillende vtables"          "$WORK/bodystat.txt" '^VTABLES=2$'
+check "een gedeeld attemptDamage"           "$WORK/bodystat.txt" '^SLOTS=1$'
+check "een ervan is de ActiveBody op naam"   "$BODIES"     'ActiveBody$'
 check "eigenaarsketen m_team +0x150"        "$REPORT"     '^\+0x150 '
 check "eigenaarsketen volledig +0x150/+0x20/+0x48" "$REPORT" '^\+0x150 +\+0x20 +\+0x48 '
 

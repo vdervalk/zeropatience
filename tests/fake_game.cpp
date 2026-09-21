@@ -16,6 +16,11 @@
 //  3. Alle zestien m_players-slots zijn gevuld, ook de ongebruikte. De
 //     scanner eiste eerder dat de achterste NULL waren en vond daardoor in
 //     een echt potje nooit een PlayerList.
+//  4. Er is niet een body-klasse maar twee. StructureBody erft van ActiveBody
+//     en overschrijft attemptDamage niet, dus slot 0 van zijn vtable bevat
+//     hetzelfde functie-adres -- in een andere tabel. Een trainer die maar een
+//     tabel hookt beschermt daardoor de helft van wat je bezit, en welke helft
+//     hangt af van welke kandidaat toevallig als eerste gevonden wordt.
 
 #include <windows.h>
 #include <cstdio>
@@ -64,6 +69,9 @@ enum : int {
     NUM_PLAYERS      = 4,
     LOCAL_PLAYER     = 1,
     NUM_OBJECTS      = 40,
+
+    // Elk vijfde object is een "gebouw" en krijgt de StructureBody-vtables.
+    STRUCTURE_EVERY  = 5,
 };
 
 // Echte functies, zodat de vtable-slots naar uitvoerbaar geheugen wijzen.
@@ -77,12 +85,20 @@ typedef void (*Fn)();
 // Hier in een struct, zodat de twee gegarandeerd binnen bereik van elkaar
 // liggen in plaats van afhankelijk van de indeling die de linker kiest.
 static const char g_poolName[] = "ActiveBody";
+static const char g_poolNameStruct[] = "StructureBody";
 // Vtables als globals: die landen in het image, net als bij de echte game.
 static Fn g_vtObject[]      = {fn0, fn1, fn2, fn3, fn4, fn5};
 static Fn g_vtBodyPrimary[] = {fn1, fn2, fn3, fn0, fn4, fn5};
 static Fn g_vtBodySnap[]    = {fn0, fn3, fn2, fn5, fn1, fn4};
 static Fn g_vtBodyBehav[]   = {fn4, fn1, fn5, fn3, fn0, fn2};
 static Fn g_vtBodyIface[]   = {fn2, fn3, fn0, fn1, fn5, fn4};
+// StructureBody: eigen tabellen, maar slot 0 van de interface-vtable wijst
+// naar dezelfde functie als die van ActiveBody. Precies zoals bij de echte
+// klasse, die attemptDamage niet overschrijft.
+static Fn g_vtStructPrimary[] = {fn3, fn2, fn1, fn0, fn5, fn4};
+static Fn g_vtStructSnap[]    = {fn1, fn0, fn4, fn5, fn2, fn3};
+static Fn g_vtStructBehav[]   = {fn5, fn2, fn0, fn4, fn3, fn1};
+static Fn g_vtStructIface[]   = {fn2, fn0, fn4, fn3, fn1, fn5};
 static Fn g_vtTeam[]        = {fn3, fn0, fn1, fn2, fn4, fn5};
 static Fn g_vtProto[]       = {fn4, fn5, fn0, fn1, fn2, fn3};
 static Fn g_vtPlayer[]      = {fn5, fn4, fn3, fn2, fn1, fn0};
@@ -93,6 +109,7 @@ struct NameAnchorBlob {
     const void* vtableRef;
 };
 extern const NameAnchorBlob g_nameAnchor;
+extern const NameAnchorBlob g_nameAnchorStruct;
 
 static void put(void* base, int off, const void* val) {
     memcpy((uint8_t*)base + off, &val, sizeof(void*));
@@ -102,11 +119,14 @@ static void putf(void* base, int off, float v) {
 }
 
 const NameAnchorBlob g_nameAnchor = {g_poolName, {nullptr}, g_vtBodyIface};
+const NameAnchorBlob g_nameAnchorStruct = {g_poolNameStruct, {nullptr}, g_vtStructIface};
 
 int main() {
     // Aanraken zodat de linker het blok zeker meeneemt.
     volatile const void* keep = g_nameAnchor.nameRef;
     (void)keep;
+    volatile const void* keep2 = g_nameAnchorStruct.nameRef;
+    (void)keep2;
 
     // --- spelers ---------------------------------------------------------
     std::vector<void*> players;
@@ -159,11 +179,13 @@ int main() {
         void* body = calloc(1, BODY_SIZE);
         objects.push_back(obj);
 
+        const bool isStructure = (i % STRUCTURE_EVERY) == 0;
+
         put(obj, 0, g_vtObject);
-        put(body, 0, g_vtBodyPrimary);
-        put(body, BODY_VPTR_SNAP,  g_vtBodySnap);
-        put(body, BODY_VPTR_BEHAV, g_vtBodyBehav);
-        put(body, BODY_IFACE_VPTR, g_vtBodyIface);
+        put(body, 0, isStructure ? g_vtStructPrimary : g_vtBodyPrimary);
+        put(body, BODY_VPTR_SNAP,  isStructure ? g_vtStructSnap  : g_vtBodySnap);
+        put(body, BODY_VPTR_BEHAV, isStructure ? g_vtStructBehav : g_vtBodyBehav);
+        put(body, BODY_IFACE_VPTR, isStructure ? g_vtStructIface : g_vtBodyIface);
 
         uint8_t* iface = (uint8_t*)body + BODY_IFACE_VPTR;   // de 'this' van de hook
 
@@ -203,6 +225,7 @@ int main() {
     printf("VERWACHT Team::m_proto   = +0x%x\n", TEAM_M_PROTO);
     printf("VERWACHT Proto::m_owner  = +0x%x\n", PROTO_M_OWNER);
     printf("VERWACHT lokale index    = %d van %d\n", LOCAL_PLAYER, NUM_PLAYERS);
+    printf("VERWACHT body-klassen    = 2 (ActiveBody en StructureBody)\n");
     fflush(stdout);
 
     Sleep(600000);

@@ -72,6 +72,49 @@ overschreven instructie.
 De volledige onderbouwing met broncodeverwijzingen staat in
 [`docs/research.md`](docs/research.md).
 
+### Zeven body-klassen, dus zeven vtables
+
+Er is niet één body-klasse maar zeven, en elke klasse heeft zijn eigen vtable:
+
+```
+ActiveBody
+  StructureBody          <- alle gebouwen
+    HiveStructureBody
+  UndeadBody
+  HighlanderBody
+  ImmortalBody
+InactiveBody
+```
+
+`StructureBody` en `ImmortalBody` overschrijven `attemptDamage` helemaal niet.
+In hun vtable staat dus hetzelfde functie-adres als in die van `ActiveBody` --
+maar het is een **andere tabel**, en een hook op slot 0 van de ene raakt de
+andere niet.
+
+Een eerdere versie hookte precies één tabel: de eerste kandidaat die de
+poolnaam "ActiveBody" opleverde. Dat verklaart het symptoom waarmee dit aan
+het licht kwam: na het laden van een opgeslagen potje leek de trainer niet meer
+te werken, terwijl het log een geslaagde resolutie liet zien. De hook stond er
+wel, alleen op de tabel van de andere helft van je bezit.
+
+Zoeken doen we niet op naam, want dat hoeft niet. Zodra de dubbele link bekend
+is, levert een steekproef Objecten ze allemaal op:
+
+```
+voor elk Object:
+    body = *(Object + objectToBody)
+    als *(body + thisToObject) == Object:        <- link sluit heen en terug
+        vtable = *body                           <- dit is een body-vtable
+```
+
+Wat daar uitkomt is per definitie een body-vtable met het juiste subobject.
+Elke gevonden tabel krijgt zijn eigen thunk met zijn eigen bewaarde origineel,
+want de klassen die `attemptDamage` wél overschrijven hebben elk een ander
+origineel om naar door te geven.
+
+`InactiveBody` slaan we bewust over: die heeft geen hitpoints en gaat alleen
+dood aan `DAMAGE_UNRESISTABLE`, en dat type laat de detour toch al door.
+
 ### De keten die de hook gebruikt
 
 ```
@@ -469,7 +512,16 @@ juist toe:
   oplevert en de echte relatie verdrong;
 - **alle zestien spelerslots gevuld**, ook de ongebruikte;
 - een blok **opvulling dat zich voordoet als vtable**, met één uitvoerbaar
-  slot en verder nullen.
+  slot en verder nullen;
+- **twee body-klassen** in plaats van één, met eigen vtables maar hetzelfde
+  `attemptDamage` in slot 0 -- precies de situatie waarin een trainer die één
+  tabel hookt de helft van je bezit mist;
+- **de echo van de buurman**: een geheugenpool geeft blokken van vaste grootte
+  uit, dus dezelfde vier hitpoint-floats zijn ook te lezen vanuit het volgende
+  object, op de echte offset plus de stap. Die schaduw haalde in het testdoel
+  meer variatie dan het echte veld (hij kijkt in objecten van gemengde
+  klassen) en verdrong het. De afstand verraadt hem: hij ligt een heel object
+  verderop, en daar kan geen veld van dít object meer staan.
 
 Wat de tests **niet** dekken: de 32-bit MSVC RTTI-parser, want MinGW zendt
 Itanium-ABI RTTI uit en geen MSVC-RTTI. Dat pad is optioneel; als het faalt
