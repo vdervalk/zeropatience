@@ -30,6 +30,7 @@ enum : int {
     ID_COPYLOG,
     ID_HOTKEY,
     ID_PROTECT,
+    ID_STRUCTURES,
     ID_TIMER = 1,
 };
 
@@ -63,7 +64,7 @@ static const int kHotkeyCount = (int)(sizeof(kHotkeys) / sizeof(kHotkeys[0]));
 
 static HWND g_main, g_lblStatus, g_btnPrimary, g_lblBlocked, g_lblHotkey;
 static HWND g_cbHotkey, g_btnDetails, g_btnUnhook, g_btnCopy, g_log, g_lblWarn;
-static HWND g_lblProtect, g_cbProtect;
+static HWND g_lblProtect, g_cbProtect, g_chkStructures;
 static HFONT g_font, g_fontBig;
 
 static DWORD    g_gamePid = 0;
@@ -71,6 +72,7 @@ static HANDLE   g_mapping = nullptr;
 static Shared*  g_shared = nullptr;
 static uint32_t g_hotkeyVk = VK_F9;
 static int32_t  g_protectPlayer = -1;   // -1 = jouw speler, -2 = iedereen
+static uint32_t g_protectStructures = 1;
 static uint32_t g_lastLogLen = 0;
 static bool     g_expanded = false;
 static bool     g_autoExpanded = false;   // eenmalig uitklappen bij een fout
@@ -103,12 +105,16 @@ static std::string iniPath() { return pathNextToExe("zeropatience.ini"); }
 static void loadSettings() {
     g_hotkeyVk = (uint32_t)GetPrivateProfileIntA("trainer", "hotkey", VK_F9,
                                                  iniPath().c_str());
+    g_protectStructures = (uint32_t)GetPrivateProfileIntA(
+        "trainer", "gebouwen", 1, iniPath().c_str());
 }
 
 static void saveSettings() {
     char buf[32];
     snprintf(buf, sizeof(buf), "%u", g_hotkeyVk);
     WritePrivateProfileStringA("trainer", "hotkey", buf, iniPath().c_str());
+    snprintf(buf, sizeof(buf), "%u", g_protectStructures);
+    WritePrivateProfileStringA("trainer", "gebouwen", buf, iniPath().c_str());
 }
 
 // -------------------------------------------------------- gedeeld geheugen --
@@ -137,6 +143,7 @@ static bool attachShared(DWORD pid) {
     }
     g_shared->hotkeyVk = g_hotkeyVk;
     g_shared->protectPlayer = g_protectPlayer;
+    g_shared->protectStructures = g_protectStructures;
     return true;
 }
 
@@ -203,6 +210,7 @@ static void setExpanded(bool on) {
     ShowWindow(g_btnCopy, on ? SW_SHOW : SW_HIDE);
     ShowWindow(g_lblProtect, on ? SW_SHOW : SW_HIDE);
     ShowWindow(g_cbProtect, on ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_chkStructures, on ? SW_SHOW : SW_HIDE);
     setText(g_btnDetails, on ? L"Minder" : L"Details");
 
     RECT rc = {0, 0, W_CLIENT, on ? H_EXPANDED : H_COMPACT};
@@ -363,10 +371,15 @@ static void buildUi(HWND w) {
     }
     SendMessageW(g_cbProtect, CB_SETCURSEL, 0, 0);
 
+    g_chkStructures = mk(L"BUTTON", L"Ook gebouwen onkwetsbaar",
+                         BS_AUTOCHECKBOX, 96, 216, 234, 20, w, ID_STRUCTURES);
+    SendMessageW(g_chkStructures, BM_SETCHECK,
+                 g_protectStructures ? BST_CHECKED : BST_UNCHECKED, 0);
+
     g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                             WS_CHILD | WS_VSCROLL | ES_MULTILINE |
                             ES_READONLY | ES_AUTOVSCROLL,
-                            14, 220, W_CLIENT - 28, 236, w, nullptr,
+                            14, 244, W_CLIENT - 28, 212, w, nullptr,
                             GetModuleHandleW(nullptr), nullptr);
     SendMessageW(g_log, WM_SETFONT, (WPARAM)g_font, TRUE);
 
@@ -477,6 +490,13 @@ static LRESULT CALLBACK wndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (id == ID_COPYLOG) { copyLog(); return 0; }
+            if (id == ID_STRUCTURES) {
+                g_protectStructures =
+                    SendMessageW(g_chkStructures, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (g_shared) g_shared->protectStructures = g_protectStructures;
+                saveSettings();
+                return 0;
+            }
             if (id == ID_PROTECT && HIWORD(wp) == CBN_SELCHANGE) {
                 const int sel = (int)SendMessageW(g_cbProtect, CB_GETCURSEL, 0, 0);
                 // 0 -> -1 (de lokale speler), 1 -> -2 (iedereen), 2+k -> k.

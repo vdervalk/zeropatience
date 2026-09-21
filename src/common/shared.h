@@ -18,7 +18,7 @@ namespace zp {
 
 enum : uint32_t {
     SHARED_MAGIC   = 0x5A504652u,   // "ZPFR"
-    SHARED_VERSION = 2,
+    SHARED_VERSION = 3,
     SHARED_LOG_BYTES = 16384,
 };
 
@@ -76,6 +76,11 @@ struct Shared {
     // en met een vast nummer kun je uit het log aflezen welke speler jij bent
     // en dat instellen, zonder op de afleiding te wachten.
     int32_t  protectPlayer;
+
+    // 1 = ook gebouwen onkwetsbaar, 0 = alleen wat uit de op naam bevestigde
+    // ActiveBody-tabel komt. Gebouwen hebben een eigen body-klasse en dus een
+    // eigen vtable, dus dit is te zien aan het object zelf.
+    uint32_t protectStructures;
 
     char log[SHARED_LOG_BYTES];
 };

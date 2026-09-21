@@ -66,6 +66,7 @@ static bool openShared() {
     // moet expliciet "de lokale speler" zijn, anders beschermt een verse
     // mapping stilzwijgend het verkeerde.
     g_shared->protectPlayer = -1;
+    g_shared->protectStructures = 1;
     return true;
 }
 
@@ -332,10 +333,61 @@ enum : uint32_t {
     DMG_NUM_TYPES       = 38,
 };
 
-static const uint32_t kPassThrough =
+// Generals kent geen m_kill, dus daar blijft deze lijst het enige dat we
+// hebben: alles wat geen wapen is, gaat erdoor.
+static const uint32_t kPassThroughLegacy =
     (1u << DMG_HEALING)  | (1u << DMG_UNRESISTABLE) | (1u << DMG_WATER) |
     (1u << DMG_DEPLOY)   | (1u << DMG_SURRENDER)    | (1u << DMG_HACK)  |
     (1u << DMG_DISARM)   | (1u << DMG_HAZARD_CLEANUP);
+
+// Zero Hour heeft m_kill, en dan is deze lijst veel korter. Alleen de types
+// die spelmechaniek zijn en niets met schade te maken hebben. UNRESISTABLE en
+// WATER staan er met opzet NIET meer bij:
+//
+//   void JetAIUpdate::...() {                      // straaljager zonder munitie
+//       damageInfo.in.m_damageType = DAMAGE_UNRESISTABLE;
+//       damageInfo.in.m_sourceID   = INVALID_ID;
+//       jet->attemptDamage( &damageInfo );         // m_kill blijft FALSE
+//   }
+//
+// Dat is schade zonder aanvaller en zonder kill-vlag, en hij maakt je
+// vliegtuig af terwijl de bescherming aanstaat. Object::kill() zet m_kill wel,
+// dus het opruimen van parachutes blijft gewoon werken.
+static const uint32_t kMechanics =
+    (1u << DMG_HEALING)  | (1u << DMG_DEPLOY)       | (1u << DMG_SURRENDER) |
+    (1u << DMG_HACK)     | (1u << DMG_DISARM)       | (1u << DMG_HAZARD_CLEANUP);
+
+// Wat er per schadetype gebeurde. Zonder deze telling is "hij gaat toch dood"
+// weer een gok: dan is niet te zien welk type er binnenkwam en of wij hem
+// doorlieten of blokkeerden.
+static LONG g_typeSeen[DMG_NUM_TYPES + 1];
+static LONG g_typePassed[DMG_NUM_TYPES + 1];
+static LONG g_typeBlocked[DMG_NUM_TYPES + 1];
+static const char* damageTypeName(uint32_t dt) {
+    switch (dt) {
+        case 0:  return "explosie";      case 1:  return "verplettering";
+        case 2:  return "pantserbrekend";case 3:  return "handvuurwapen";
+        case 4:  return "gatling";       case 5:  return "straling";
+        case 6:  return "vlammen";       case 7:  return "laser";
+        case 8:  return "sluipschutter"; case 9:  return "gif";
+        case 10: return "genezing";      case 11: return "onweerstaanbaar";
+        case 12: return "water";         case 13: return "uitladen";
+        case 14: return "overgave";      case 15: return "hacken";
+        case 16: return "piloot doden";  case 17: return "strafpunten";
+        case 18: return "vallen";        case 19: return "steekwapen";
+        case 20: return "ontmantelen";   case 21: return "veld opruimen";
+        case 22: return "deeltjesstraal";case 23: return "omvallen";
+        case 24: return "infanterieraket"; case 25: return "aurora-bom";
+        case 26: return "landmijn";      case 27: return "jachtvliegtuigraket";
+        case 28: return "stealthjet-raket"; case 29: return "molotov";
+        case 30: return "comanche-vulcan";  case 31: return "subdual raket";
+        case 32: return "subdual voertuig"; case 33: return "subdual gebouw";
+        case 34: return "subdual onweerstaanbaar";
+        case 35: return "magnetron";     case 36: return "inzittenden doden";
+        case 37: return "statusschade";
+        default: return "onbekend";
+    }
+}
 
 // Twee eenmalige regels in het log, en samen vertellen ze het hele verhaal
 // bij een melding "hij doet niets":
@@ -366,6 +418,7 @@ enum Bail : int {
     BAIL_PLAYERLIST,
     BAIL_LOCAL,
     BAIL_NOTMINE,
+    BAIL_STRUCTURE,    // van jou, maar gebouwen staan uit
     BAIL_BLOCKED,
     BAIL_COUNT
 };
@@ -424,13 +477,29 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
     // Lukte het niet om de indeling van DamageInfo te meten, dan is
     // damageTypeOffset nul en blokkeren we alles. Dat is het oude gedrag: de
     // bescherming blijft werken, maar de glitches komen terug.
+    uint32_t dt = DMG_NUM_TYPES;     // DMG_NUM_TYPES = "niet gemeten"
     if (g_r.damageTypeOffset) {
-        const uint32_t dt =
-            *(const uint32_t*)((const char*)damageInfo + g_r.damageTypeOffset);
+        dt = *(const uint32_t*)((const char*)damageInfo + g_r.damageTypeOffset);
+        if (dt > DMG_NUM_TYPES) dt = DMG_NUM_TYPES;
         g_sampleType = dt;
         if (record) g_first.damageType = dt;
-        if (dt < DMG_NUM_TYPES && (kPassThrough & (1u << dt)))
+        InterlockedIncrement(&g_typeSeen[dt]);
+
+        bool pass = false;
+        if (dt < DMG_NUM_TYPES && (kMechanics & (1u << dt))) {
+            pass = true;                        // spelmechaniek, geen schade
+        } else if (g_r.killOffset) {
+            // Zero Hour: Object::kill() zet m_kill. Dat is de opruimfunctie
+            // van de engine, en die moet erdoor. Al het andere niet, ook niet
+            // als het onweerstaanbaar heet.
+            pass = *(const uint8_t*)((const char*)damageInfo + g_r.killOffset) != 0;
+        } else if (dt < DMG_NUM_TYPES) {
+            pass = (kPassThroughLegacy & (1u << dt)) != 0;   // Generals
+        }
+        if (pass) {
+            InterlockedIncrement(&g_typePassed[dt]);
             return bump(BAIL_PASS);
+        }
     }
 
     const char* s = (const char*)self;
@@ -489,7 +558,19 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
         g_sampleLocal = local;
         return bump(BAIL_NOTMINE);
     }
+
+    // Gebouwen apart kunnen laten. StructureBody is een eigen klasse met een
+    // eigen vtable, dus het volstaat om te kijken uit welke tabel dit object
+    // komt: de op naam bevestigde ActiveBody, of een van de andere. Dat is
+    // grofmazig -- een paar bijzondere eenheidstypes hebben ook een eigen
+    // body-klasse -- maar het is gemeten en niet geraden, en het scheelt de
+    // hele KINDOF-afleiding.
+    if (g_shared && !g_shared->protectStructures) {
+        const void* vt = *(const void* const*)self;
+        if (vt != (const void*)g_r.bodyVtable) return bump(BAIL_STRUCTURE);
+    }
     InterlockedIncrement(&g_bail[BAIL_BLOCKED]);
+    InterlockedIncrement(&g_typeBlocked[dt]);
     if (g_shared) g_shared->blockedCount++;
     if (InterlockedExchange(&g_sawBlock, 1) == 0)
         logf("[zp] eerste schade geblokkeerd -- het werkt.\n");
@@ -562,7 +643,7 @@ static void dumpBails() {
         "schade-events", "doorgelaten type", "self ongeldig",
         "Object ongeldig", "Team ongeldig", "TeamPrototype ongeldig",
         "eigenaar ongeldig", "PlayerList ongeldig", "lokale speler ongeldig",
-        "niet van jou", "GEBLOKKEERD"
+        "niet van jou", "gebouw, staat uit", "GEBLOKKEERD"
     };
     logf("[zp] wat de hook zag:\n");
     for (int i = 0; i < BAIL_COUNT; ++i) {
@@ -592,6 +673,22 @@ static void dumpBails() {
                      (long)g_ownerHist[i], (unsigned)g_r.players[i],
                      i == g_r.localIndex ? "  <-- m_local" : "",
                      i == g_r.humanIndex ? "  <-- de mens, dus beschermd" : "");
+            }
+        }
+    }
+    // Per schadetype: hoeveel er binnenkwamen, hoeveel we doorlieten en
+    // hoeveel we blokkeerden. Een type dat binnenkomt en doorgelaten wordt
+    // terwijl je eenheid toch sneuvelt, is het spoor.
+    {
+        bool any = false;
+        for (uint32_t i = 0; i <= DMG_NUM_TYPES; ++i) if (g_typeSeen[i]) any = true;
+        if (any) {
+            logf("[zp]   schade per type:      gezien  door  geblokt\n");
+            for (uint32_t i = 0; i <= DMG_NUM_TYPES; ++i) {
+                if (!g_typeSeen[i]) continue;
+                logf("[zp]     %-2u %-20s %-7ld %-5ld %ld\n",
+                     i, damageTypeName(i), (long)g_typeSeen[i],
+                     (long)g_typePassed[i], (long)g_typeBlocked[i]);
             }
         }
     }
@@ -675,6 +772,11 @@ static bool attachOnce() {
     for (int i = 0; i < BAIL_COUNT; ++i) InterlockedExchange(&g_bail[i], 0);
     InterlockedExchange(&g_firstTaken, 0);
     for (int i = 0; i < 17; ++i) InterlockedExchange(&g_ownerHist[i], 0);
+    for (uint32_t i = 0; i <= DMG_NUM_TYPES; ++i) {
+        InterlockedExchange(&g_typeSeen[i], 0);
+        InterlockedExchange(&g_typePassed[i], 0);
+        InterlockedExchange(&g_typeBlocked[i], 0);
+    }
     g_first = ChainSample();
     g_sampleOwner = g_sampleLocal = nullptr;
     g_sampleType = 0xFFFFFFFFu;

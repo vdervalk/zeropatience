@@ -388,6 +388,55 @@ tegen drie van de echte, met wisselende vtables per stap. Onder de oude
 rangorde won het lokaas; de test controleert nu welke keten er gekozen is, niet
 of hij ergens in de tabel voorkomt.
 
+### Wat er doorgelaten wordt, en waarom dat eerst fout was
+
+`Object::kill()` is de opruimfunctie van de engine en loopt over hetzelfde pad
+als een kogel. Blokkeer je die, dan kan een parachute zichzelf niet meer
+opruimen. De eerste oplossing was een lijst met schadetypes die altijd door
+mochten, met `DAMAGE_UNRESISTABLE` erbij.
+
+Die lijst was te grof. Uit de engine:
+
+```cpp
+// JetAIUpdate: een straaljager die niet kan bijtanken beschadigt zichzelf
+damageInfo.in.m_damageType = DAMAGE_UNRESISTABLE;
+damageInfo.in.m_sourceID   = INVALID_ID;
+jet->attemptDamage( &damageInfo );          // m_kill blijft FALSE
+```
+
+Schade zonder aanvaller, van een type dat wij doorlieten, en genoeg om je
+vliegtuig af te maken terwijl de bescherming aanstond.
+
+Het echte onderscheid staat één veld verderop:
+
+```cpp
+void Object::kill( DamageType t, DeathType d ) {
+    ...
+    damageInfo.in.m_kill = TRUE;   // Triggers object to die no matter what.
+    attemptDamage( &damageInfo );
+}
+```
+
+`m_kill` staat **alleen** aan als de engine of een script het object opruimt.
+Geen enkel wapen zet die vlag. In Zero Hour is de doorlaat daarom: alleen
+spelmechaniek (genezen, uitladen, hacken, ontmantelen, velden opruimen) en
+alles met `m_kill`. In Generals bestaat het veld niet, daar blijft de oude
+lijst gelden.
+
+De offset is afgeleid uit de gemeten `m_damageType` en sluit op de eveneens
+gemeten `sizeof(DamageInfoInput) == 0x40`. Let op dat `m_kill` een `Bool` is
+van **één** byte; een schrijf- of leesactie van vier bytes pakt er velden
+naast mee.
+
+### Gebouwen apart
+
+`StructureBody` is een eigen klasse met een eigen vtable, dus aan het object
+zelf is te zien of het een gebouw is. Achter *Details* staat daarom **Ook
+gebouwen onkwetsbaar**. Uit betekent: alleen objecten uit de op naam
+bevestigde `ActiveBody`-tabel. Dat is grofmazig -- een paar bijzondere
+eenheidstypes hebben ook een eigen body-klasse en vallen er dan buiten -- maar
+het is gemeten en niet geraden.
+
 ### Wie is "jij"?
 
 Niet `m_local`, of in elk geval niet alleen. In een echte meting kwam de

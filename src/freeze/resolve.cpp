@@ -257,9 +257,18 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
             if (inOffset && best->second >= 8) {
                 r.damageInfoInSize = inSize;
                 r.damageTypeOffset = 4 + inOffset;      // vanaf DamageInfo zelf
-                say("DamageInfo: in-grootte 0x%x (%s), schadetype op +0x%x\n",
+                r.sourceIdOffset   = r.damageTypeOffset - 0xC;
+                // De rest van DamageInfoInput in Zero Hour, vanaf m_damageType:
+                //   +0x00 m_damageType   +0x04 m_damageStatusType
+                //   +0x08 m_damageFXOverride  +0x0c m_deathType
+                //   +0x10 m_amount       +0x14 m_kill (Bool, EEN byte)
+                // Dat sluit op sizeof 0x40, en dat is precies wat we gemeten
+                // hebben. In Generals bestaat m_kill niet.
+                if (inSize == 0x40) r.killOffset = r.damageTypeOffset + 0x14;
+                say("DamageInfo: in-grootte 0x%x (%s), schadetype op +0x%x%s\n",
                     inSize, inSize == 0x18 ? "Generals" : "Zero Hour",
-                    r.damageTypeOffset);
+                    r.damageTypeOffset,
+                    r.killOffset ? ", m_kill beschikbaar" : "");
             } else {
                 say("DamageInfo: in-grootte 0x%x herken ik niet; de hook "
                     "blokkeert straks alles.\n", inSize);

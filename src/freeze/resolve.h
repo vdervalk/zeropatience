@@ -87,6 +87,21 @@ struct Resolved {
     uint32_t damageTypeOffset = 0;
     uint32_t damageInfoInSize = 0;   // 0x18 = Generals, 0x40 = Zero Hour
 
+    // DamageInfoInput::m_kill, een Bool van EEN byte:
+    //
+    //   void Object::kill( DamageType t, DeathType d ) {
+    //       ...
+    //       damageInfo.in.m_kill = TRUE;   // Triggers object to die no matter what.
+    //       attemptDamage( &damageInfo );
+    //   }
+    //
+    // Dat is precies het onderscheid dat we nodig hebben. Object::kill() is
+    // de opruimfunctie van de engine (parachutes, scripts, verdrinken); alles
+    // wat een wapen doet zet die vlag niet. Zero Hour alleen: in Generals
+    // bestaat het veld niet, daar blijft de oude lijst met schadetypes gelden.
+    uint32_t killOffset = 0;
+    uint32_t sourceIdOffset = 0;
+
     // De spelers zelf, plus de offset van Player::m_playerIndex. Die offset
     // is niet gegokt maar bewezen: ThePlayerList maakt de zestien spelers met
     // NEW Player(i) en de constructor zet m_playerIndex = i, dus er is precies
