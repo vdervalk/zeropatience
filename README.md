@@ -324,6 +324,35 @@ De GUI onderscheidt de twee wel in de statusregel. Dat gaat op het
 installatiepad, want beide spellen heten `game.dat` en de procesnaam zegt
 dus niets.
 
+### Als de hook wel staat maar niets blokkeert
+
+Het log zegt dit zelf. Een paar seconden nadat er voor het eerst schade langs
+de hook komt, verschijnt een tabel:
+
+```
+[zp] wat de hook zag:
+[zp]   schade-events            412
+[zp]   doorgelaten type          18
+[zp]   niet van jou             394
+[zp]   GEBLOKKEERD                0
+[zp]   eerste keten: self 0x... -> Object 0x... -> Team 0x...
+```
+
+Wat de regels betekenen:
+
+- **niet van jou** bij alles — de keten loopt wel, maar komt op een andere
+  speler uit dan jij. Er is dan alleen op vijandelijke eenheden geschoten, of
+  de laatste stap van de keten klopt niet. De voorbeeldregel met `eigenaar` en
+  `jij` laat het verschil zien.
+- **een van de "ongeldig"-regels** — daar knapt de keten. Het adres in de
+  regel `eerste keten` bij die stap zegt waarom: nul betekent dat er niets
+  stond, en een adres boven `adresgrens van dit proces` betekent dat de
+  plausibiliteitstoets hem afwees.
+- **doorgelaten type** bij alles — dan wordt alle schade als besturing gezien
+  en klopt de gemeten indeling van `DamageInfo` niet.
+- **geen tabel** — er is nooit schade langs de hook gekomen. Dan staan de
+  hooks op de verkeerde tabellen, of er is simpelweg niet op je geschoten.
+
 ### Als koppelen mislukt
 
 De trainer weigert liever dan dat hij gokt. Mislukt de afleiding, dan wordt

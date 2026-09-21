@@ -270,9 +270,31 @@ static bool selfCheckThunk() {
 // Goedkope plausibiliteitstoets. Een volledige VirtualQuery per schade-event
 // is te duur, en de faalwijze hier is veilig: bij een onbetrouwbare pointer
 // zeggen we "niet van mij", en dan verloopt de schade gewoon normaal.
+//
+// De bovengrens komt van het systeem, niet uit mijn hoofd. Hier stond
+// 0x80000000, de klassieke 2 GB-grens voor een 32-bit proces -- maar een
+// proces dat als LARGEADDRESSAWARE is gelinkt krijgt op 64-bit Windows de
+// volle 4 GB, en de heap van dit spel loopt daar ruim overheen. Elke pointer
+// boven de 2 GB werd dus afgekeurd, en dan zegt de eigenaarscontrole bij elk
+// object "niet van jou" en blokkeert er nooit iets. Dat is precies het
+// symptoom: de hook draait, maar er wordt niets tegengehouden.
+//
+// GetSystemInfo geeft de echte grens voor dit proces: 0x7FFEFFFF zonder
+// LARGEADDRESSAWARE, 0xFFFEFFFF met. Zo blijft de toets streng waar dat kan
+// en ruim waar dat moet.
+static uintptr_t g_maxAddr = 0x7FFEFFFFu;
+
+static void measureAddressSpace() {
+    SYSTEM_INFO si;
+    memset(&si, 0, sizeof(si));
+    GetSystemInfo(&si);
+    const uintptr_t hi = (uintptr_t)si.lpMaximumApplicationAddress;
+    if (hi > 0x10000) g_maxAddr = hi;
+}
+
 static inline bool ptrOk(const void* p) {
     uintptr_t v = (uintptr_t)p;
-    return v >= 0x10000 && v < 0x80000000u && (v & 3) == 0;
+    return v >= 0x10000 && v <= g_maxAddr && (v & 3) == 0;
 }
 
 // Welke schadetypes zijn wapens en welke zijn besturing van de engine?
@@ -316,8 +338,9 @@ static const uint32_t kPassThrough =
 //
 //   geen van beide  -> de hook draait niet. Verkeerde vtables, of er is
 //                      simpelweg nog niet op je geschoten.
-//   alleen "gezien" -> de hook draait wel, maar de eigenaarscontrole zegt
-//                      elke keer "niet van jou". Dan zit de fout in de keten.
+//   alleen "gezien" -> de hook draait wel, maar de controle zegt elke keer
+//                      "niet van jou". Dan telt de tabel hieronder waar het
+//                      precies strandt.
 //   allebei         -> het werkt.
 //
 // Eenmalig via Interlocked, want de detour draait op de thread van het spel
@@ -325,13 +348,64 @@ static const uint32_t kPassThrough =
 static LONG g_sawDamage = 0;
 static LONG g_sawBlock = 0;
 
+// Waar de controle afhaakt, geteld per reden. Zonder deze telling is "hij
+// blokkeert niets" een doodlopend spoor: elke stap in de keten kan het zijn,
+// en ik kan niet bij de machine waar het misgaat.
+enum Bail : int {
+    BAIL_EVENTS = 0,   // schade langs de hook, met de bescherming aan
+    BAIL_PASS,         // doorgelaten schadetype (kill, water, deploy, ...)
+    BAIL_SELF,
+    BAIL_OBJECT,
+    BAIL_TEAM,
+    BAIL_PROTO,
+    BAIL_OWNER,
+    BAIL_PLAYERLIST,
+    BAIL_LOCAL,
+    BAIL_NOTMINE,
+    BAIL_BLOCKED,
+    BAIL_COUNT
+};
+static LONG g_bail[BAIL_COUNT];
+
+// De hele keten van het eerste schade-event, stap voor stap bewaard. Een
+// telling zegt waar het strandt; deze adressen zeggen waarom. Alles wat niet
+// gelezen kon worden blijft nul.
+struct ChainSample {
+    void* self = nullptr;
+    void* object = nullptr;
+    void* team = nullptr;
+    void* proto = nullptr;
+    void* owner = nullptr;
+    void* playerList = nullptr;
+    void* local = nullptr;
+    uint32_t damageType = 0xFFFFFFFFu;
+    bool  filled = false;
+};
+static ChainSample g_first;
+static LONG        g_firstTaken = 0;
+
+// Een voorbeeld van de laatste stap, ook als het niet het eerste event was:
+// zo is te zien of het om twee geldige maar verschillende spelers gaat.
+static void* g_sampleOwner = nullptr;
+static void* g_sampleLocal = nullptr;
+static uint32_t g_sampleType = 0xFFFFFFFFu;
+
+static inline int bump(Bail b) { InterlockedIncrement(&g_bail[b]); return 0; }
+
 extern "C" int zp_should_block(void* self, void* damageInfo) {
     if (g_forceBlock) return 1;         // alleen tijdens de zelfcontrole
     if (!g_enabled) return 0;
+    InterlockedIncrement(&g_bail[BAIL_EVENTS]);
     if (InterlockedExchange(&g_sawDamage, 1) == 0)
         logf("[zp] eerste schade langs de hook gezien.\n");
     if (!damageInfo) return 0;          // het origineel returnt hier zelf ook
-    if (!ptrOk(self)) return 0;
+
+    // Het eerste event leggen we stap voor stap vast. Alleen deze ene keer,
+    // want dit draait op de thread van het spel.
+    const bool record = InterlockedExchange(&g_firstTaken, 1) == 0;
+    if (record) g_first.self = self;
+
+    if (!ptrOk(self)) return bump(BAIL_SELF);
 
     // Is dit besturing in plaats van een wapen? Dan doorlaten, anders breekt
     // de objectlevenscyclus van het spel.
@@ -342,30 +416,44 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
     if (g_r.damageTypeOffset) {
         const uint32_t dt =
             *(const uint32_t*)((const char*)damageInfo + g_r.damageTypeOffset);
-        if (dt < DMG_NUM_TYPES && (kPassThrough & (1u << dt))) return 0;
+        g_sampleType = dt;
+        if (record) g_first.damageType = dt;
+        if (dt < DMG_NUM_TYPES && (kPassThrough & (1u << dt)))
+            return bump(BAIL_PASS);
     }
 
     const char* s = (const char*)self;
 
     void* obj = *(void**)(s + g_r.thisToObject);
-    if (!ptrOk(obj)) return 0;
+    if (record) g_first.object = obj;
+    if (!ptrOk(obj)) return bump(BAIL_OBJECT);
 
     void* team = *(void**)((const char*)obj + g_r.objectToTeam);
-    if (!ptrOk(team)) return 0;
+    if (record) g_first.team = team;
+    if (!ptrOk(team)) return bump(BAIL_TEAM);
 
     void* proto = *(void**)((const char*)team + g_r.teamToProto);
-    if (!ptrOk(proto)) return 0;
+    if (record) g_first.proto = proto;
+    if (!ptrOk(proto)) return bump(BAIL_PROTO);
 
     void* owner = *(void**)((const char*)proto + g_r.protoToPlayer);
-    if (!ptrOk(owner)) return 0;
+    if (record) g_first.owner = owner;
+    if (!ptrOk(owner)) return bump(BAIL_OWNER);
 
     void* pl = *(void**)g_r.playerListGlobal;
-    if (!ptrOk(pl)) return 0;
+    if (record) g_first.playerList = pl;
+    if (!ptrOk(pl)) return bump(BAIL_PLAYERLIST);
 
     void* local = *(void**)((const char*)pl + g_r.localPlayerOffset);
-    if (!ptrOk(local)) return 0;
+    if (record) { g_first.local = local; g_first.filled = true; }
+    if (!ptrOk(local)) return bump(BAIL_LOCAL);
 
-    if (owner != local) return 0;
+    if (owner != local) {
+        g_sampleOwner = owner;
+        g_sampleLocal = local;
+        return bump(BAIL_NOTMINE);
+    }
+    InterlockedIncrement(&g_bail[BAIL_BLOCKED]);
     if (g_shared) g_shared->blockedCount++;
     if (InterlockedExchange(&g_sawBlock, 1) == 0)
         logf("[zp] eerste schade geblokkeerd -- het werkt.\n");
@@ -430,6 +518,49 @@ static void removeHook() {
     g_hooked = false;
 }
 
+// Wat de detour de afgelopen seconden zag. Wordt een paar seconden na de
+// eerste schade een keer afgedrukt, en daarna alleen nog als er iets
+// verandert dat ertoe doet.
+static void dumpBails() {
+    static const char* kName[BAIL_COUNT] = {
+        "schade-events", "doorgelaten type", "self ongeldig",
+        "Object ongeldig", "Team ongeldig", "TeamPrototype ongeldig",
+        "eigenaar ongeldig", "PlayerList ongeldig", "lokale speler ongeldig",
+        "niet van jou", "GEBLOKKEERD"
+    };
+    logf("[zp] wat de hook zag:\n");
+    for (int i = 0; i < BAIL_COUNT; ++i) {
+        const LONG n = g_bail[i];
+        if (!n && i != BAIL_EVENTS && i != BAIL_BLOCKED) continue;
+        logf("[zp]   %-24s %ld\n", kName[i], (long)n);
+    }
+    if (g_bail[BAIL_NOTMINE])
+        logf("[zp]   voorbeeld: eigenaar 0x%08x, jij 0x%08x\n",
+             (unsigned)(uintptr_t)g_sampleOwner,
+             (unsigned)(uintptr_t)g_sampleLocal);
+    if (g_sampleType != 0xFFFFFFFFu)
+        logf("[zp]   laatst geziene schadetype: %u\n", (unsigned)g_sampleType);
+    logf("[zp]   adresgrens van dit proces: 0x%08x\n", (unsigned)g_maxAddr);
+
+    // De keten van het eerste event, stap voor stap. Een telling zegt waar
+    // het strandt, deze adressen zeggen waarom: een nul betekent dat die stap
+    // niet meer gelezen is, en een adres boven de grens hierboven verklaart
+    // meteen waarom de toets hem afwees.
+    if (g_firstTaken) {
+        logf("[zp]   eerste keten: self 0x%08x -> Object 0x%08x -> Team 0x%08x\n",
+             (unsigned)(uintptr_t)g_first.self,
+             (unsigned)(uintptr_t)g_first.object,
+             (unsigned)(uintptr_t)g_first.team);
+        logf("[zp]                 -> Proto 0x%08x -> eigenaar 0x%08x\n",
+             (unsigned)(uintptr_t)g_first.proto,
+             (unsigned)(uintptr_t)g_first.owner);
+        logf("[zp]                 PlayerList 0x%08x, jij 0x%08x, type %u\n",
+             (unsigned)(uintptr_t)g_first.playerList,
+             (unsigned)(uintptr_t)g_first.local,
+             (unsigned)g_first.damageType);
+    }
+}
+
 // ------------------------------------------------------------ hoofdverloop --
 
 static void banner() {
@@ -474,6 +605,11 @@ static void status() {
 static bool attachOnce() {
     InterlockedExchange(&g_sawDamage, 0);
     InterlockedExchange(&g_sawBlock, 0);
+    for (int i = 0; i < BAIL_COUNT; ++i) InterlockedExchange(&g_bail[i], 0);
+    InterlockedExchange(&g_firstTaken, 0);
+    g_first = ChainSample();
+    g_sampleOwner = g_sampleLocal = nullptr;
+    g_sampleType = 0xFFFFFFFFu;
     setState(STATE_RESOLVING);
     logf("[zp] offsets bepalen...\n");
     // Ruim genomen. Een eerdere poging met 192 MB mislukte: het spel houdt
@@ -531,8 +667,22 @@ static bool attachOnce() {
 // Draait zolang de hook staat. Keert terug als de GUI om loskoppelen vraagt.
 static void runHooked() {
     bool hotkeyDown = false;
+    DWORD firstDamageAt = 0;
+    int dumps = 0;
     for (;;) {
         Sleep(30);
+
+        // Een paar seconden na de eerste schade de tabel afdrukken, en nog
+        // een keer wat later. Niet vaker: dit is diagnose, geen telraam.
+        if (g_sawDamage && dumps < 2) {
+            const DWORD now = GetTickCount();
+            if (!firstDamageAt) firstDamageAt = now;
+            const DWORD wait = dumps == 0 ? 4000u : 20000u;
+            if (now - firstDamageAt >= wait) {
+                dumpBails();
+                dumps++;
+            }
+        }
 
         if (g_shared) {
             // De GUI mag aan- en uitzetten. Alleen overnemen als het echt
@@ -607,6 +757,7 @@ static DWORD WINAPI worker(LPVOID) {
         logf("[zp] geen gedeeld geheugen; terugval op dit venster.\n");
     }
     banner();
+    measureAddressSpace();
 
     // De thunkcontrole hoeft maar een keer: die hangt aan de build, niet aan
     // wat er in het spel gebeurt. Faalt hij, dan valt er niets te herhalen.
