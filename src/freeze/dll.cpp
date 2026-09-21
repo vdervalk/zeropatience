@@ -470,13 +470,19 @@ extern "C" int zp_should_block(void* self, void* damageInfo) {
     }
     InterlockedIncrement(&g_ownerHist[ownerIdx < 0 ? 16 : ownerIdx]);
 
-    // -1 = de lokale speler van de engine, -2 = iedereen (test),
-    // 0..15 = een vast nummer dat je zelf koos.
+    // -1 = automatisch, -2 = iedereen (test), 0..15 = een vast nummer.
+    //
+    // Automatisch is bij voorkeur de enige speler met PLAYER_HUMAN. Dat is
+    // een sterker gegeven dan m_local: Player::init zet iedereen op
+    // PLAYER_COMPUTER, ook de neutrale speler, en alleen de echte menselijke
+    // speler wordt daarna op HUMAN gezet. Is die niet eenduidig te vinden,
+    // dan valt het terug op m_local zoals de engine hem zelf leest.
     const int32_t mode = g_shared ? g_shared->protectPlayer : -1;
     bool mine;
-    if (mode == -2)      mine = true;
-    else if (mode >= 0)  mine = (ownerIdx == mode);
-    else                 mine = (owner == local);
+    if (mode == -2)                 mine = true;
+    else if (mode >= 0)             mine = (ownerIdx == mode);
+    else if (g_r.humanIndex >= 0)   mine = (ownerIdx == g_r.humanIndex);
+    else                            mine = (owner == local);
 
     if (!mine) {
         g_sampleOwner = owner;
@@ -582,9 +588,10 @@ static void dumpBails() {
                     logf("[zp]     onbekend   %ld\n", (long)g_ownerHist[i]);
                     continue;
                 }
-                logf("[zp]     speler %-2d  %-6ld 0x%08x%s\n", i,
+                logf("[zp]     speler %-2d  %-6ld 0x%08x%s%s\n", i,
                      (long)g_ownerHist[i], (unsigned)g_r.players[i],
-                     i == g_r.localIndex ? "   <-- volgens ons ben jij dit" : "");
+                     i == g_r.localIndex ? "  <-- m_local" : "",
+                     i == g_r.humanIndex ? "  <-- de mens, dus beschermd" : "");
             }
         }
     }
@@ -644,6 +651,12 @@ static void status() {
     logf("[zp] this -> health  +0x%x\n", (unsigned)g_r.healthOffset);
     logf("[zp] eigenaarsketen  +0x%x / +0x%x / +0x%x  (%u spelers)\n",
          g_r.objectToTeam, g_r.teamToProto, g_r.protoToPlayer, g_r.chainPlayers);
+    if (g_r.humanIndex >= 0)
+        logf("[zp] beschermd       speler %d (de enige menselijke speler)%s\n",
+             g_r.humanIndex,
+             g_r.humanIndex == g_r.localIndex ? "" : "  -- m_local zegt iets anders");
+    else
+        logf("[zp] beschermd       m_local (geen eenduidige menselijke speler)\n");
     if (g_r.damageTypeOffset)
         logf("[zp] schadetype op   DamageInfo+0x%x  (in-grootte 0x%x, %s)\n",
              g_r.damageTypeOffset, g_r.damageInfoInSize,

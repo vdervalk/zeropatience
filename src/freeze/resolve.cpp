@@ -41,6 +41,37 @@ bool findGlobalPointerNear(const Target& t, uint64_t target, uint32_t maxDelta,
     return false;
 }
 
+// AsciiString en UnicodeString zijn allebei een enkele pointer naar een blok
+// dat begint met twee shorts (refCount, numCharsAllocated); de tekens volgen
+// daarachter. Lezen we onzin, dan geven we een lege string terug -- een naam
+// is comfort, geen bewijs, en een verzonnen naam is erger dan geen naam.
+std::string readGameString(const Target& t, uint64_t at, bool wide) {
+    uint64_t data = 0;
+    if (!t.rptr(at, data) || !data) return "";
+    uint16_t refCount = 0, alloc = 0;
+    if (!t.r16(data, refCount) || !t.r16(data + 2, alloc)) return "";
+    if (refCount == 0 || refCount > 0x1000) return "";
+    if (alloc == 0 || alloc > 512) return "";
+
+    std::string out;
+    for (uint32_t i = 0; i < alloc && i < 64; ++i) {
+        uint32_t ch = 0;
+        if (wide) {
+            uint16_t w = 0;
+            if (!t.r16(data + 4 + i * 2, w)) return "";
+            ch = w;
+        } else {
+            uint8_t b = 0;
+            if (!t.r8(data + 4 + i, b)) return "";
+            ch = b;
+        }
+        if (ch == 0) return out;
+        if (ch < 32 || ch > 126) return "";     // geen leesbare naam
+        out += (char)ch;
+    }
+    return "";                                   // geen afsluitende nul
+}
+
 } // namespace
 
 Resolved resolveInProcess(uint64_t snapshotBudgetMB,
@@ -401,10 +432,65 @@ Resolved resolveInProcess(uint64_t snapshotBudgetMB,
         say("Player::m_playerIndex niet gevonden; het log kan straks geen "
             "spelernummers noemen\n");
     }
-    for (size_t i = 0; i < pl.players.size() && i < 16; ++i)
-        say("  speler %2zu  0x%08llx%s\n", i,
-            (unsigned long long)r.players[i],
-            (int)i == pl.localIndex ? "   <-- jij" : "");
+    // --- de rest van Player, afgeleid uit m_playerIndex -------------------
+    if (r.playerIndexOffset >= 0x24) {
+        const uint32_t base = r.playerIndexOffset;
+
+        // m_playerType: alle zestien moeten 0 of 1 zijn, en er hoort er
+        // precies een HUMAN te zijn. Klopt dat niet, dan gebruiken we hem
+        // niet -- dan is de offset blijkbaar toch niet wat we denken.
+        const uint32_t typeOff = base + 0xC;
+        uint32_t humans = 0, bad = 0;
+        int32_t  human = -1;
+        for (size_t i = 0; i < pl.players.size() && i < 16; ++i) {
+            uint32_t v = 0;
+            if (!t.r32((uint64_t)r.players[i] + typeOff, v) || v > 1) { bad++; continue; }
+            if (v == 0) { humans++; human = (int32_t)i; }
+        }
+        if (!bad && humans == 1) {
+            r.playerTypeOffset = typeOff;
+            r.humanIndex = human;
+            r.humanPlayer = r.players[human];
+        }
+
+        r.playerNameOffset        = base - 0x8;    // m_playerName
+        r.playerDisplayNameOffset = base - 0x1C;   // m_playerDisplayName
+    }
+
+    for (size_t i = 0; i < pl.players.size() && i < 16; ++i) {
+        std::string name, display;
+        if (r.playerNameOffset)
+            name = readGameString(t, (uint64_t)r.players[i] + r.playerNameOffset, false);
+        if (r.playerDisplayNameOffset)
+            display = readGameString(
+                t, (uint64_t)r.players[i] + r.playerDisplayNameOffset, true);
+
+        const char* kind = "";
+        if (r.playerTypeOffset) {
+            uint32_t v = 1;
+            t.r32((uint64_t)r.players[i] + r.playerTypeOffset, v);
+            kind = v == 0 ? "MENS" : "cpu ";
+        }
+
+        say("  speler %2zu  0x%08llx  %s  %-14s %-16s%s%s\n", i,
+            (unsigned long long)r.players[i], kind,
+            name.empty() ? "-" : name.c_str(),
+            display.empty() ? "-" : display.c_str(),
+            (int)i == pl.localIndex ? "  <-- m_local" : "",
+            (int32_t)i == r.humanIndex ? "  <-- de mens" : "");
+    }
+
+    // Als de engine iets anders zegt dan de enige menselijke speler, dan is
+    // dat het vermelden waard: het is precies het verschil waardoor de
+    // bescherming op de verkeerde speler terecht kan komen.
+    if (r.humanIndex >= 0 && r.humanIndex != pl.localIndex) {
+        say("LET OP: m_local wijst naar speler %d, maar de enige menselijke\n",
+            pl.localIndex);
+        say("        speler is %d. We beschermen speler %d.\n",
+            r.humanIndex, r.humanIndex);
+    } else if (r.humanIndex < 0) {
+        say("Geen eenduidige menselijke speler gevonden; we houden m_local aan.\n");
+    }
 
     if (!findGlobalPointerNear(t, pl.addr, 0x40,
                                &r.playerListGlobal, &r.localPlayerOffset)) {

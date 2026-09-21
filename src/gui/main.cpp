@@ -352,6 +352,9 @@ static void buildUi(HWND w) {
     g_cbProtect = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
                      96, 188, 234, 300, w, ID_PROTECT);
     SendMessageW(g_cbProtect, CB_ADDSTRING, 0, (LPARAM)L"jouw speler (automatisch)");
+    // De tekst hierboven blijft staan, maar "automatisch" betekent nu: de
+    // enige speler met PLAYER_HUMAN, en pas als die niet eenduidig is de
+    // m_local van de engine. Welke het werd staat in het log.
     SendMessageW(g_cbProtect, CB_ADDSTRING, 0, (LPARAM)L"alle spelers (alleen als test)");
     for (int i = 0; i < 16; ++i) {
         wchar_t b[32];

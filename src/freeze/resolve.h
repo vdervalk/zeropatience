@@ -102,6 +102,31 @@ struct Resolved {
     int32_t   localIndex = -1;
     uintptr_t localPlayerAtResolve = 0;
 
+    // Zodra m_playerIndex vastligt, ligt de hele Player vast. De broncode:
+    //
+    //   const PlayerTemplate* m_playerTemplate;   // +0x04
+    //   UnicodeString         m_playerDisplayName;// +0x08
+    //   Handicap              m_handicap;         // +0x0c, Real[2][2]
+    //   AsciiString           m_playerName;       // +0x1c
+    //   NameKeyType           m_playerNameKey;    // +0x20
+    //   PlayerIndex           m_playerIndex;      // +0x24  <-- gemeten
+    //   AsciiString           m_side;             // +0x28
+    //   AsciiString           m_baseSide;         // +0x2c
+    //   PlayerType            m_playerType;       // +0x30
+    //
+    // De meting kwam op precies +0x24 uit, dus de rest volgt. Elke afgeleide
+    // offset wordt alsnog gecontroleerd voordat hij gebruikt wordt.
+    uint32_t  playerTypeOffset = 0;
+    uint32_t  playerNameOffset = 0;
+    uint32_t  playerDisplayNameOffset = 0;
+
+    // De enige speler met PLAYER_HUMAN. Player::init zet iedereen op
+    // PLAYER_COMPUTER, ook de neutrale speler; alleen de echte menselijke
+    // speler wordt daarna op HUMAN gezet. In een potje in je eentje is er dus
+    // precies een, en dat ben jij.
+    int32_t   humanIndex = -1;
+    uintptr_t humanPlayer = 0;
+
     // De globale pointer naar ThePlayerList, plus waar m_local daarin staat.
     // De PlayerList zelf verhuist per potje; deze globale pointer niet, dus
     // hiermee blijft de hook geldig als je een nieuw potje start.

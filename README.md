@@ -353,6 +353,47 @@ Wat de regels betekenen:
 - **geen tabel** — er is nooit schade langs de hook gekomen. Dan staan de
   hooks op de verkeerde tabellen, of er is simpelweg niet op je geschoten.
 
+### Wie is "jij"?
+
+Niet `m_local`, of in elk geval niet alleen. In een echte meting kwam de
+schade uit op de spelers 0, 2 en 5 terwijl `m_local` naar speler 4 wees: de
+bescherming stond dus op een speler die niets bezat wat geraakt werd.
+
+Er is een sterker gegeven, en het staat in de engine zelf. `Player::init()`
+zet **iedereen** op `PLAYER_COMPUTER`, ook de neutrale speler; alleen de echte
+menselijke speler wordt daarna op `PLAYER_HUMAN` gezet. In een potje in je
+eentje is er dus precies één, en dat ben jij.
+
+Die offset is niet gegokt. `Player::m_playerIndex` is gemeten -- er is precies
+één offset waar bij alle zestien spelers hun eigen positie in de array staat
+-- en die meting kwam uit op +0x24, exact waar de broncode hem zet:
+
+```cpp
+const PlayerTemplate* m_playerTemplate;    // +0x04
+UnicodeString         m_playerDisplayName; // +0x08
+Handicap              m_handicap;          // +0x0c, Real[2][2]
+AsciiString           m_playerName;        // +0x1c
+NameKeyType           m_playerNameKey;     // +0x20
+PlayerIndex           m_playerIndex;       // +0x24  <-- gemeten
+AsciiString           m_side;              // +0x28
+AsciiString           m_baseSide;          // +0x2c
+PlayerType            m_playerType;        // +0x30
+```
+
+Eén gemeten offset legt de hele structuur vast. De afgeleide offsets worden
+alsnog gecontroleerd voordat ze gebruikt worden: `m_playerType` moet bij alle
+zestien spelers 0 of 1 zijn met precies één HUMAN, en een naam moet leesbaar
+zijn en netjes op een nul eindigen. Lukt dat niet, dan valt de bescherming
+terug op `m_local`.
+
+Het log toont de tabel bij het koppelen:
+
+```
+  speler  0  0x0dbbc5a4  cpu   -              -
+  speler  2  0x0dd299bc  MENS  player1        Gijs              <-- de mens
+  speler  4  0x19d48c8c  cpu   ThePlayer      -                 <-- m_local
+```
+
 ### Als alles op "niet van jou" uitkomt
 
 Dan loopt de keten wel, maar komt hij nooit bij jouw speler uit. Het log
